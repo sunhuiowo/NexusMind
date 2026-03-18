@@ -20,6 +20,7 @@ interface SessionState {
   switchSession: (id: string) => void
   getCurrentSession: () => ChatSession | null
   addMessage: (msg: ChatMessage) => void
+  addMessageToSession: (sessionId: string, msg: ChatMessage) => void
   updateSessionName: (id: string, name: string) => void
   clearCurrentSession: () => void
   clearCurrentSessionMessages: () => void
@@ -79,6 +80,16 @@ export const useSessionStore = create<SessionState>()(
             ),
           }
         })
+      },
+
+      addMessageToSession: (sessionId: string, msg: ChatMessage) => {
+        set((s) => ({
+          sessions: s.sessions.map((session) =>
+            session.id === sessionId
+              ? { ...session, messages: [...session.messages, msg], updated_at: Date.now() }
+              : session
+          ),
+        }))
       },
 
       updateSessionName: (id: string, name: string) => {

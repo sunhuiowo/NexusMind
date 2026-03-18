@@ -65,7 +65,7 @@ interface ChatPanelProps {
 }
 
 export default function ChatPanel({ sessionId, onClose }: ChatPanelProps) {
-  const { sessions, addMessage: addSessionMessage, updateSessionName, clearCurrentSessionMessages } = useSessionStore()
+  const { sessions, addMessageToSession, updateSessionName, clearCurrentSessionMessages } = useSessionStore()
   const { isQuerying, queryingSessionId, setQuerying } = useGlobalQueryStore()
 
   const push = useToastStore((s) => s.push)
@@ -120,7 +120,7 @@ export default function ChatPanel({ sessionId, onClose }: ChatPanelProps) {
       content: query,
       timestamp: Date.now(),
     }
-    addSessionMessage(userMsg)
+    addMessageToSession(sessionId, userMsg)
 
     try {
       const conversationHistory = getConversationHistory()
@@ -133,7 +133,7 @@ export default function ChatPanel({ sessionId, onClose }: ChatPanelProps) {
         thinking: result.thinking,
         timestamp: Date.now(),
       }
-      addSessionMessage(assistantMsg)
+      addMessageToSession(sessionId, assistantMsg)
     } catch (err) {
       const errorMsg: ChatMessage = {
         id: Math.random().toString(36).slice(2),
@@ -141,7 +141,7 @@ export default function ChatPanel({ sessionId, onClose }: ChatPanelProps) {
         content: '查询失败，请检查后端服务是否运行中。',
         timestamp: Date.now(),
       }
-      addSessionMessage(errorMsg)
+      addMessageToSession(sessionId, errorMsg)
       push('查询失败，请检查后端连接', 'error')
     } finally {
       setQuerying(false)

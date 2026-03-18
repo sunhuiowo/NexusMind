@@ -18,7 +18,7 @@ const queryClient = new QueryClient({
 
 function ChatArea() {
   const setStats = useStatsStore(s => s.setStats)
-  const { sessions, createSession } = useSessionStore()
+  const { sessions, currentSessionId, createSession } = useSessionStore()
 
   // Load stats on mount for sidebar
   useEffect(() => {
@@ -32,18 +32,16 @@ function ChatArea() {
     }
   }, [sessions.length, createSession])
 
-  // Render multiple chat panels
-  if (sessions.length === 0) {
+  // Get current session to display
+  const currentSession = sessions.find(s => s.id === currentSessionId) || sessions[0]
+
+  if (!currentSession) {
     return null
   }
 
   return (
-    <div className="flex-1 flex overflow-hidden">
-      {sessions.map((session) => (
-        <div key={session.id} className="flex-1 min-w-0">
-          <ChatPanel sessionId={session.id} />
-        </div>
-      ))}
+    <div className="flex-1 overflow-hidden">
+      <ChatPanel sessionId={currentSession.id} />
     </div>
   )
 }
