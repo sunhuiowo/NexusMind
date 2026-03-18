@@ -53,8 +53,7 @@ function AppShell() {
 
       {/* Main content */}
       <main
-        className="flex flex-col overflow-hidden"
-        style={{ marginLeft: 'var(--sidebar-w)' }}
+        className="flex-1 flex flex-col overflow-hidden"
       >
         <Routes>
           <Route path="/" element={<ChatArea />} />
