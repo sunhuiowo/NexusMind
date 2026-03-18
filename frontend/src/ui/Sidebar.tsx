@@ -1,6 +1,6 @@
 // ui/Sidebar.tsx
 import { useState } from 'react'
-import { NavLink } from 'react-router-dom'
+import { NavLink, useNavigate } from 'react-router-dom'
 import { MessageSquare, Library, Plug, RefreshCw, Settings, Brain, ChevronDown, ChevronRight, Plus, Trash2 } from 'lucide-react'
 import { useStatsStore, useSessionStore } from '../store'
 import { cx } from '../utils'
@@ -14,15 +14,22 @@ const NAV = [
 
 export default function Sidebar() {
   const stats = useStatsStore((s) => s.stats)
+  const navigate = useNavigate()
   const { sessions, currentSessionId, createSession, deleteSession, switchSession } = useSessionStore()
   const [chatExpanded, setChatExpanded] = useState(true)
 
   function handleNewSession() {
     createSession()
+    navigate('/')
   }
 
   function handleSelectSession(sessionId: string) {
     switchSession(sessionId)
+    navigate('/')
+  }
+
+  function handleChatClick() {
+    navigate('/')
   }
 
   return (
@@ -46,7 +53,7 @@ export default function Sidebar() {
         {/* Chat Sessions - Expandable */}
         <div>
           <button
-            onClick={() => setChatExpanded(!chatExpanded)}
+            onClick={() => { setChatExpanded(!chatExpanded); navigate('/'); }}
             className={cx(
               'nav-item w-full justify-between',
               currentSessionId ? 'active' : ''
