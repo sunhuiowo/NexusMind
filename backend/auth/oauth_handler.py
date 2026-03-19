@@ -74,10 +74,10 @@ class OAuthHandler:
     """OAuth 2.0 统一流程处理器"""
 
     def __init__(self, token_store: TokenStore = None):
-        self._store = token_store or get_token_store()
-        self._pending_states: Dict[str, Dict] = {}  # state -> {platform, code_verifier}
+        self._store = token_store  # Don't call get_token_store() here
+        self._pending_states: Dict[str, Dict] = {}  # state -> {platform, user_id, code_verifier}
 
-    def get_auth_url(self, platform: str) -> Tuple[str, str]:
+    def get_auth_url(self, platform: str, user_id: str) -> Tuple[str, str]:
         """
         生成平台授权 URL
         返回 (auth_url, state)
@@ -101,7 +101,7 @@ class OAuthHandler:
             "access_type": "offline",  # 请求 refresh_token（Google）
         }
 
-        pending = {"platform": platform}
+        pending = {"platform": platform, "user_id": user_id}
 
         # PKCE 支持（Twitter 等）
         if cfg.get("use_pkce"):
@@ -123,6 +123,8 @@ class OAuthHandler:
         if not pending or pending["platform"] != platform:
             print(f"[OAuth] state 无效或已过期: {state}")
             return False
+
+        user_id = pending.get("user_id", "_default")  # Extract user_id
 
         cfg = PLATFORM_OAUTH_CONFIGS.get(platform)
         if not cfg:
@@ -153,14 +155,15 @@ class OAuthHandler:
             print(f"[OAuth] {platform} token 换取失败: {e}")
             return False
 
-        return self._save_token_response(platform, token_json, cfg)
+        return self._save_token_response(platform, token_json, cfg, user_id)
 
-    def refresh_token(self, platform: str) -> bool:
+    def refresh_token(self, platform: str, user_id: str) -> bool:
         """
         静默刷新 access_token
         过期前 TOKEN_REFRESH_BEFORE_MINUTES 分钟自动调用
         """
-        token_data = self._store.load(platform)
+        token_store = get_token_store(user_id)
+        token_data = token_store.load(platform)
         if not token_data or not token_data.refresh_token:
             return False
 
@@ -181,21 +184,22 @@ class OAuthHandler:
             token_json = resp.json()
         except Exception as e:
             print(f"[OAuth] {platform} token 刷新失败: {e}")
-            self._store.mark_needs_reauth(platform, str(e))
+            token_store.mark_needs_reauth(platform, str(e))
             return False
 
         # 某些平台不返回新 refresh_token，保留旧的
         if "refresh_token" not in token_json:
             token_json["refresh_token"] = token_data.refresh_token
 
-        return self._save_token_response(platform, token_json, cfg)
+        return self._save_token_response(platform, token_json, cfg, user_id)
 
-    def ensure_valid_token(self, platform: str) -> Optional[str]:
+    def ensure_valid_token(self, platform: str, user_id: str) -> Optional[str]:
         """
         确保 access_token 有效，必要时自动刷新
         返回有效的 access_token 或 None
         """
-        token_data = self._store.load(platform)
+        token_store = get_token_store(user_id)
+        token_data = token_store.load(platform)
         if not token_data:
             return None
 
@@ -205,13 +209,13 @@ class OAuthHandler:
 
         if token_data.is_expiring_soon():
             print(f"[OAuth] {platform} token 即将过期，静默刷新中...")
-            if not self.refresh_token(platform):
+            if not self.refresh_token(platform, user_id):
                 return None
-            token_data = self._store.load(platform)
+            token_data = token_store.load(platform)
 
         return token_data.access_token if token_data else None
 
-    def _save_token_response(self, platform: str, token_json: dict, cfg: dict) -> bool:
+    def _save_token_response(self, platform: str, token_json: dict, cfg: dict, user_id: str) -> bool:
         """解析 token 响应并保存"""
         expires_in = token_json.get("expires_in", 3600)
         expires_at = (datetime.utcnow() + timedelta(seconds=expires_in)).isoformat()
@@ -232,22 +236,16 @@ class OAuthHandler:
             print(f"[OAuth] {platform} 未收到 access_token")
             return False
 
-        self._store.save(token_data)
+        from auth.token_store import get_token_store
+        token_store = get_token_store(user_id)
+        token_store.save(token_data)
         print(f"[OAuth] {platform} 授权成功，token 已加密存储")
         return True
 
-    def revoke(self, platform: str) -> None:
+    def revoke(self, platform: str, user_id: str) -> None:
         """撤销平台授权"""
-        self._store.delete(platform)
+        token_store = get_token_store(user_id)
+        token_store.delete(platform)
         print(f"[OAuth] {platform} 授权已撤销")
 
 
-# ── 全局单例 ──────────────────────────────────────────────────────────────────
-_oauth_handler: Optional[OAuthHandler] = None
-
-
-def get_oauth_handler() -> OAuthHandler:
-    global _oauth_handler
-    if _oauth_handler is None:
-        _oauth_handler = OAuthHandler()
-    return _oauth_handler
