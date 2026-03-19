@@ -14,6 +14,7 @@ DATA_DIR = BASE_DIR / "data"
 AUTH_DIR = DATA_DIR / "auth"
 VECTOR_DIR = DATA_DIR / "vectors"
 RUNTIME_CONFIG_PATH = DATA_DIR / "runtime_config.json"
+USERS_DB_PATH = DATA_DIR / "users.db"
 
 for _d in [DATA_DIR, AUTH_DIR, VECTOR_DIR]:
     _d.mkdir(parents=True, exist_ok=True)
