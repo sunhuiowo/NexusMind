@@ -86,16 +86,33 @@ Run: `sed -n '131,153p' backend/memory/memory_store.py`
 
 - [ ] **Step 2: Update _memory_to_params to add user_id as first param**
 
-Change the tuple to include `memory.user_id` as the first value:
+The tuple currently returns 20 elements (one per column). After adding user_id, it returns 21:
 
 ```python
     def _memory_to_params(self, memory: Memory, faiss_pos: int = -1) -> tuple:
         return (
-            memory.user_id,  # NEW: first position
-            memory.id,
-            memory.created_at,
-            # ... rest unchanged
-        )
+            memory.user_id,  # NEW: 1st position
+            memory.id,        # 2nd (was 1st)
+            memory.created_at,  # 3rd (was 2nd)
+            memory.platform,
+            memory.platform_name,
+            memory.platform_id,
+            memory.source_url,
+            memory.author,
+            memory.bookmarked_at,
+            memory.title,
+            memory.summary,
+            memory.raw_content[:10000] if memory.raw_content else "",
+            json.dumps(memory.tags, ensure_ascii=False),
+            memory.media_type,
+            memory.thumbnail_url,
+            memory.importance,
+            memory.query_count,
+            memory.last_accessed_at,
+            json.dumps(memory.related_ids, ensure_ascii=False),
+            memory.parent_id,
+            faiss_pos,
+        )  # Now 21 elements
 ```
 
 - [ ] **Step 3: Update INSERT statement to include user_id**
@@ -135,58 +152,52 @@ git commit -m "feat(schema): add user_id to memories table and all queries"
 **Files:**
 - Create: `backend/db/migrations/001_add_user_id.py`
 
-- [ ] **Step 1: Write migration script**
+- [ ] **Step 1: Write migration script using sqlite3 directly (NOT memory_store module)**
 
 ```python
 #!/usr/bin/env python3
 """
 Migration 001: Add user_id to memories table
 Backfills existing memories with the owner user_id based on storage path.
+Uses sqlite3 directly to avoid importing the memory_store module.
 """
 import sys
-import re
+import sqlite3
 from pathlib import Path
 
-# Add backend to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-
-from memory.memory_store import get_memory_store, _get_db_conn
-import logging
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-def migrate_memories_table(user_id: str = None):
+def migrate_memories_table(db_path: str, user_id: str = "_default"):
     """
     Add user_id column to memories table if it doesn't exist.
-    For existing data, we need to know which user owns each memory.
-    Since old data used _default, we migrate it to the first registered user
-    or a specified user_id.
+    Uses direct sqlite3 connection to avoid module-level side effects.
     """
-    db_path = str(Path(__file__).parent.parent.parent / "data" / "memories.db")
+    conn = sqlite3.connect(db_path)
 
     # Check if column already exists
-    conn = _get_db_conn(db_path)
     columns = [row[1] for row in conn.execute("PRAGMA table_info(memories)")]
-    logger.info(f"Current columns: {columns}")
+    print(f"Current columns: {columns}")
 
     if "user_id" in columns:
-        logger.info("user_id column already exists, skipping")
+        print("user_id column already exists, skipping")
+        conn.close()
         return
 
     # Add the column
     conn.execute("ALTER TABLE memories ADD COLUMN user_id TEXT NOT NULL DEFAULT '_default'")
     conn.commit()
-    logger.info("Added user_id column to memories table")
+    print("Added user_id column to memories table")
 
-    # Update all NULL/empty user_id to _default for safety
-    conn.execute("UPDATE memories SET user_id = '_default' WHERE user_id IS NULL OR user_id = ''")
+    # Update all NULL/empty user_id to the target user_id
+    conn.execute(f"UPDATE memories SET user_id = ? WHERE user_id IS NULL OR user_id = ''", (user_id,))
     conn.commit()
-    logger.info("Backfilled user_id values")
+    print(f"Backfilled user_id values with: {user_id}")
+
+    conn.close()
 
 if __name__ == "__main__":
+    backend_root = Path(__file__).parent.parent.parent
+    db_path = backend_root / "data" / "memories.db"
     user_id = sys.argv[1] if len(sys.argv) > 1 else "_default"
-    migrate_memories_table(user_id)
+    migrate_memories_table(str(db_path), user_id)
     print(f"Migration complete. Existing memories assigned to user: {user_id}")
 ```
 
@@ -256,7 +267,8 @@ def create_impersonation_token(admin_user_id: str, target_user_id: str) -> Tuple
         return "", "Target user not found"
 
     # Cannot impersonate another admin
-    if target[0] if len(target) > 0 else False:
+    target_admin = conn.execute("SELECT is_admin FROM users WHERE id = ?", (target_user_id,)).fetchone()
+    if target_admin and target_admin[0]:
         return "", "Cannot impersonate another admin"
 
     token_id = str(uuid.uuid4())
@@ -465,9 +477,32 @@ async def dispatch(self, request: Request, call_next):
         set_current_user(None)
 ```
 
-- [ ] **Step 3: Update user_store.validate_session to return is_admin**
+- [ ] **Step 3: Add validate_session_with_data to user_store**
 
-Add a `validate_session_with_data` method or modify `validate_session` to return full session data.
+In `backend/auth/user_store.py`, add a new method:
+
+```python
+    def validate_session_with_data(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Validate session and return full session data including is_admin flag.
+
+        Returns: {user_id, is_admin} or None if invalid/expired
+        """
+        conn = _get_db_conn(self._db_path)
+        row = conn.execute("""
+            SELECT s.user_id, u.is_admin
+            FROM sessions s
+            JOIN users u ON s.user_id = u.id
+            WHERE s.id = ? AND s.expires_at > ?
+        """, (session_id, datetime.now(timezone.utc).isoformat())).fetchone()
+
+        if not row:
+            return None
+
+        return {"user_id": row[0], "is_admin": bool(row[1])}
+```
+
+Also update the existing `validate_session` to delegate to this method for backward compatibility.
 
 - [ ] **Step 4: Commit**
 
@@ -601,15 +636,35 @@ Delete lines 246-253 (the `get_oauth_handler()` function and `_oauth_handler` gl
 
 Search for all callers:
 ```bash
-grep -rn "get_oauth_handler\|get_auth_url\|handle_callback" backend/ --include="*.py"
+grep -rn "get_oauth_handler\|get_auth_url\|handle_callback\|OAuthHandler" backend/main.py
 ```
 
-Update each to instantiate OAuthHandler directly with user_id.
+The callers in `main.py` will include:
+- `oauth_handler = get_oauth_handler()` (module-level) → remove or replace with per-request instantiation
+- `oauth_handler.get_auth_url(platform)` → must pass `request.state.user_id`
+- `oauth_handler.handle_callback(...)` → already passes state which now contains user_id
+
+For each caller, pass `request.state.user_id` explicitly. OAuthHandler should be instantiated per-request (not as global singleton) so it can use the correct user_id:
+
+```python
+# Before (in main.py endpoint):
+oauth_handler = get_oauth_handler()
+url, state = oauth_handler.get_auth_url(platform)
+
+# After:
+oauth_handler = OAuthHandler()  # No singleton
+url, state = oauth_handler.get_auth_url(platform, user_id=request.state.user_id)
+```
+
+**Key OAuth endpoints to fix** (check exact line numbers in main.py):
+- `/auth/connect/{platform}` — calls `oauth_handler.get_auth_url(platform)` without user_id
+- `/auth/callback/{platform}` — calls `oauth_handler.handle_callback(...)` — this is already correct since state contains user_id
+- `/auth/revoke/{platform}` — may call `get_token_store()` without user_id
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add backend/auth/oauth_handler.py
+git add backend/auth/oauth_handler.py backend/main.py
 git commit -m "fix(oauth): encode user_id in state, remove global singleton"
 ```
 
@@ -740,7 +795,18 @@ To:
 token_store = get_token_store(user_id)  # Always pass user_id
 ```
 
-- [ ] **Step 4: Verify all other get_token_store calls in collector_agent**
+- [ ] **Step 4: Fix _parse_content to receive and pass user_id (thread pool safety)**
+
+The `_parse_content` method runs inside a `ThreadPoolExecutor`. Since ContextVar doesn't reliably propagate into thread pool threads, `user_id` must be passed explicitly through the call chain.
+
+Check the call chain:
+```bash
+grep -n "_parse_content\|ThreadPoolExecutor" backend/agents/collector_agent.py
+```
+
+Ensure `_parse_content(self, content, user_id)` receives `user_id` as a parameter, then passes it when calling `get_token_store(user_id)` for Bilibili token loading.
+
+- [ ] **Step 5: Verify all other get_token_store calls in collector_agent**
 
 Search for all `get_token_store()` calls:
 ```bash
@@ -749,11 +815,11 @@ grep -n "get_token_store" backend/agents/collector_agent.py
 
 Fix any that don't pass `user_id`.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add backend/agents/collector_agent.py
-git commit -m "fix(collector): pass user_id to get_token_store"
+git commit -m "fix(collector): pass user_id to get_token_store, fix thread pool context"
 ```
 
 ---
@@ -803,7 +869,7 @@ def get_memory_agent(user_id: str) -> MemoryAgent:
     return _user_agents[user_id]
 ```
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add backend/agents/memory_agent.py
@@ -895,6 +961,7 @@ git commit -m "fix(mcp): add required user_id parameter to all tool functions"
 from fastapi import APIRouter, Request, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
+from datetime import datetime
 import uuid
 
 from auth.user_store import get_user_store
@@ -1089,6 +1156,12 @@ Run: `sed -n '340,369p' backend/auth/user_store.py`
         if user[0]:
             return False, "Cannot delete admin user"
 
+        # Clear in-memory stores (important!)
+        from memory.memory_store import _stores as memory_stores
+        from auth.token_store import _token_stores as token_stores
+        memory_stores.pop(user_id, None)
+        token_stores.pop(user_id, None)
+
         # Delete sessions
         conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
 
@@ -1149,20 +1222,41 @@ git commit -m "feat(auth): add cascade delete for user data cleanup"
 - [ ] **Step 1: Audit all route handlers in main.py**
 
 Run: `grep -n "get_memory_store()\|get_token_store()" backend/main.py`
+Expected: many calls WITHOUT user_id — these all need fixing
+
+Also check: `grep -n "oauth_handler\|OAuthHandler" backend/main.py`
 
 - [ ] **Step 2: Update each call to pass request.state.user_id**
 
 Every `get_memory_store()` → `get_memory_store(request.state.user_id)`
 Every `get_token_store()` → `get_token_store(request.state.user_id)`
 
-- [ ] **Step 3: Also update CollectorAgent.sync_single_platform calls**
+Special attention for:
+- `/auth/connect/{platform}` — OAuthHandler.get_auth_url needs user_id
+- `/auth/platforms` — `get_token_store()` without user_id
+- `/sync` and `/resync` — pass user_id to CollectorAgent
+
+- [ ] **Step 3: Fix /health endpoint (public path, no user_id available)**
+
+The `/health` endpoint bypasses session middleware (it's in PUBLIC_PATHS). After removing ContextVar fallback, it cannot call `get_memory_store()` at all.
+
+Either:
+- Make `/health` NOT call `get_memory_store()` at all (simplest)
+- Or remove `/health` from the list of things that would call it
+
+Check what `/health` actually does:
+```bash
+grep -n "def health\|/health" backend/main.py
+```
+
+- [ ] **Step 4: Also update CollectorAgent.sync_single_platform calls**
 
 Verify that sync endpoints pass user_id correctly:
 ```bash
 grep -n "sync_single_platform\|sync_platform\|CollectorAgent" backend/main.py
 ```
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add backend/main.py
