@@ -29,10 +29,9 @@ def create_impersonation_token(admin_user_id: str, target_user_id: str) -> Tuple
     Create an impersonation token for an admin to act as target_user.
     Returns: (token_id, error_or_none)
     """
-    conn = _get_conn()
+    conn_userstore = _get_conn()
 
     # Verify admin is actually an admin
-    conn_userstore = _get_conn()
     admin = conn_userstore.execute("SELECT is_admin FROM users WHERE id = ?", (admin_user_id,)).fetchone()
     if not admin or not admin[0]:
         return "", "Not authorized to impersonate"
@@ -48,18 +47,18 @@ def create_impersonation_token(admin_user_id: str, target_user_id: str) -> Tuple
     created_at = datetime.now(timezone.utc).isoformat()
     expires_at = (datetime.now(timezone.utc) + timedelta(hours=IMPERSONATION_EXPIRY_HOURS)).isoformat()
 
-    conn.execute("""
+    conn_userstore.execute("""
         INSERT INTO impersonation_tokens (id, admin_user_id, target_user_id, created_at, expires_at, audit_log)
         VALUES (?, ?, ?, ?, ?, ?)
     """, (token_id, admin_user_id, target_user_id, created_at, expires_at, json.dumps([])))
 
     # Log impersonation start
-    conn.execute("""
+    conn_userstore.execute("""
         INSERT INTO admin_audit_logs (id, admin_user_id, action, target_user_id, details, created_at)
         VALUES (?, ?, ?, ?, ?, ?)
     """, (str(uuid.uuid4()), admin_user_id, "impersonate_start", target_user_id,
           json.dumps({"token_id": token_id}), created_at))
-    conn.commit()
+    conn_userstore.commit()
 
     logger.info(f"[Impersonation] Admin {admin_user_id} started impersonating {target_user_id}")
     return token_id, None
