@@ -659,22 +659,19 @@ class MemoryStore:
 _stores: Dict[str, MemoryStore] = {}
 
 
-def get_memory_store(user_id: str = None) -> MemoryStore:
+def get_memory_store(user_id: str) -> MemoryStore:
     """
-    获取指定用户的 MemoryStore 实例
-    如果 user_id 为 None，尝试从上下文变量获取，否则使用默认实例（向后兼容）
+    Get a MemoryStore for the specified user.
+    user_id is REQUIRED - no default, no ContextVar fallback.
+    Raises ValueError if user_id is empty.
     """
     global _stores
 
-    # 如果没有提供 user_id，尝试从上下文变量获取
     if not user_id:
-        user_id = get_current_user()
+        raise ValueError("get_memory_store() requires explicit user_id. "
+                        "Use request.state.user_id from SessionMiddleware.")
 
-    # 如果上下文中也没有用户ID，使用默认标识（向后兼容）
-    if not user_id:
-        user_id = "_default"
-
-    # 如果该用户的存储实例不存在，则创建
+    # If this user's store instance doesn't exist, create it
     if user_id not in _stores:
         # _default 用户使用原始数据库（向后兼容），其他用户使用独立的存储路径
         if user_id == "_default":
