@@ -189,13 +189,13 @@ class UserStore:
             logger.error(f"[UserStore] Failed to register user: {e}")
             return None, str(e)
 
-    def login_user(self, username: str, password: str) -> Optional[Dict[str, Any]]:
+    def login_user(self, username: str, password: str) -> Dict[str, Any]:
         """
         Login user with username and password
 
         Returns:
             Dict with session_id, user_id, username, is_admin on success
-            None on failure
+            Dict with "error" key on failure
         """
         conn = _get_db_conn(self._db_path)
 
@@ -207,12 +207,12 @@ class UserStore:
 
         if not row:
             logger.warning(f"[UserStore] Login failed - user not found: {username}")
-            return None
+            return {"error": "Invalid username or password"}
 
         # Verify password
         if not self._verify_password(password, row["password_hash"]):
             logger.warning(f"[UserStore] Login failed - wrong password: {username}")
-            return None
+            return {"error": "Invalid username or password"}
 
         # Create session
         session_id = self._generate_session_id()
