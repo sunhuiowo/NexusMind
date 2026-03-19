@@ -129,6 +129,29 @@ class UserStore:
             CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)
         """)
 
+        # Impersonation tokens for admin delegation
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS impersonation_tokens (
+                id TEXT PRIMARY KEY,
+                admin_user_id TEXT NOT NULL,
+                target_user_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                audit_log TEXT
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS admin_audit_logs (
+                id TEXT PRIMARY KEY,
+                admin_user_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                target_user_id TEXT,
+                details TEXT,
+                created_at TEXT NOT NULL
+            )
+        """)
+
         conn.commit()
         logger.info(f"[UserStore] Database initialized: {self._db_path}")
 
