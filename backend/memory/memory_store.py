@@ -348,7 +348,7 @@ class MemoryStore:
             conn.commit()
             return conn.execute("SELECT changes()").fetchone()[0] > 0
 
-    def delete(self, memory_id: str, user_id: str = None) -> bool:
+    def delete(self, memory_id: str, user_id: str = "") -> bool:
         """删除记忆（SQLite 删除，FAISS 标记废弃）"""
         if not user_id:
             user_id = get_current_user()
@@ -391,7 +391,7 @@ class MemoryStore:
                 logger.error(f"[MemoryStore] 清空数据失败: {e}")
                 return False
 
-    def get(self, memory_id: str, user_id: str = None) -> Optional[Memory]:
+    def get(self, memory_id: str, user_id: str = "") -> Optional[Memory]:
         """按 ID 查询记忆"""
         if not user_id:
             user_id = get_current_user()
@@ -399,7 +399,7 @@ class MemoryStore:
         row = conn.execute("SELECT * FROM memories WHERE id=? AND user_id=?", (memory_id, user_id)).fetchone()
         return self._row_to_memory(row) if row else None
 
-    def exists_by_platform_id(self, platform: str, platform_id: str, user_id: str = None) -> bool:
+    def exists_by_platform_id(self, platform: str, platform_id: str, user_id: str = "") -> bool:
         """按平台 + 平台侧 ID 去重查询"""
         conn = _get_db_conn(self._db_path)
         # Lazy init: if this is a new thread connection, table might not exist yet
@@ -612,7 +612,7 @@ class MemoryStore:
         ).fetchall()
         return [self._row_to_memory(r) for r in rows]
 
-    def increment_query_count(self, memory_id: str, user_id: str = None) -> None:
+    def increment_query_count(self, memory_id: str, user_id: str = "") -> None:
         """命中后增加查询计数并更新 importance"""
         if not user_id:
             user_id = get_current_user()
