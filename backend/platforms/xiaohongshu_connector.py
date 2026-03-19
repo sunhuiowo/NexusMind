@@ -44,8 +44,8 @@ class XiaohongshuConnector(BasePlatformConnector):
     认证失效时返回 needs_reauth 状态，不抛出异常（原则 7）
     """
 
-    def __init__(self):
-        self._store = get_token_store()
+    def __init__(self, user_id: str = ""):
+        self._store = get_token_store(user_id)
         self._cookie: Optional[str] = None
         self._session = requests.Session()
 

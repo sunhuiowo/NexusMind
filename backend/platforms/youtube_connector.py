@@ -26,8 +26,8 @@ YT_API_BASE = "https://www.googleapis.com/youtube/v3"
 class YouTubeConnector(BasePlatformConnector):
     """YouTube 连接器 - OAuth 2.0"""
 
-    def __init__(self):
-        self._store = get_token_store()
+    def __init__(self, user_id: str = ""):
+        self._store = get_token_store(user_id)
         self._oauth = get_oauth_handler()
         self._access_token: Optional[str] = None
 

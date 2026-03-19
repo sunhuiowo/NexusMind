@@ -23,8 +23,8 @@ WECHAT_API_BASE = "https://qyapi.weixin.qq.com/cgi-bin"
 
 class WeChatConnector(BasePlatformConnector):
 
-    def __init__(self):
-        self._store = get_token_store()
+    def __init__(self, user_id: str = ""):
+        self._store = get_token_store(user_id)
         self._api_key: Optional[str] = None
         self._corp_access_token: Optional[str] = None
 

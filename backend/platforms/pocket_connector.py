@@ -31,8 +31,8 @@ class PocketConnector(BasePlatformConnector):
     认证模式：Pocket 自有 OAuth（request token -> 授权页 -> access token）
     """
 
-    def __init__(self):
-        self._store = get_token_store()
+    def __init__(self, user_id: str = ""):
+        self._store = get_token_store(user_id)
         self._access_token: Optional[str] = None
         self._username: Optional[str] = None
 

@@ -25,8 +25,8 @@ BILI_API_BASE = "https://api.bilibili.com"
 
 class BilibiliConnector(BasePlatformConnector):
 
-    def __init__(self):
-        self._store = get_token_store()
+    def __init__(self, user_id: str = ""):
+        self._store = get_token_store(user_id)
         self._oauth = get_oauth_handler()
         self._access_token: Optional[str] = None
         # B站专用 Cookie 字段
