@@ -216,6 +216,8 @@ class MemoryStore:
             # 确保 user_id 已设置
             if not memory.user_id:
                 memory.user_id = get_current_user() or "_default"
+                if memory.user_id == "_default":
+                    logger.warning(f"[MemoryStore] Memory saved with user_id='_default' (no user context)")
 
             if not memory.id:
                 import uuid
@@ -279,6 +281,8 @@ class MemoryStore:
                 # 确保 user_id 已设置
                 if not memory.user_id:
                     memory.user_id = get_current_user() or "_default"
+                    if memory.user_id == "_default":
+                        logger.warning(f"[MemoryStore] Memory {memory.id} saved with user_id='_default' (no user context)")
 
                 if not memory.id:
                     import uuid
@@ -364,6 +368,7 @@ class MemoryStore:
             try:
                 # 清空 SQLite 表
                 conn = _get_db_conn(self._db_path)
+                # WARNING: This deletes ALL memories for ALL users. Use with extreme caution.
                 conn.execute("DELETE FROM memories")
                 conn.commit()
                 logger.info(f"[MemoryStore] SQLite 数据已清空")
