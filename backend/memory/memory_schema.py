@@ -56,6 +56,9 @@ class Memory:
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
 
+    # ── 所有者 ────────────────────────────────────────────────────────────────
+    user_id: str = ""           # 所属用户 ID，强制字段
+
     # ── 平台来源（问答必须返回的核心字段）────────────────────────────────────
     platform: str = ""           # 平台 ID：'youtube' / 'xiaohongshu' ...
     platform_name: str = ""      # 平台显示名：'YouTube' / '小红书' ...
@@ -88,6 +91,7 @@ class Memory:
         return {
             "id": self.id,
             "created_at": self.created_at,
+            "user_id": self.user_id,
             "platform": self.platform,
             "platform_name": self.platform_name,
             "platform_id": self.platform_id,
@@ -113,6 +117,7 @@ class Memory:
         return cls(
             id=d.get("id", str(uuid.uuid4())),
             created_at=d.get("created_at", ""),
+            user_id=d.get("user_id", ""),
             platform=d.get("platform", ""),
             platform_name=d.get("platform_name", ""),
             platform_id=d.get("platform_id", ""),
