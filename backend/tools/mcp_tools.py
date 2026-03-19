@@ -57,6 +57,7 @@ def search_memory(
 
     results = store.search_by_vector(
         query_embedding,
+        user_id,
         query_text=query,  # 传入原始查询文本用于关键词匹配
         top_k=top_k,
         platform_filter=platform_filter,
@@ -67,7 +68,7 @@ def search_memory(
 
     # 更新查询计数
     for memory, _ in results:
-        store.increment_query_count(memory.id)
+        store.increment_query_count(memory.id, user_id)
 
     hits = [
         MemoryCard.from_memory(memory, relevance_score=score)
@@ -97,6 +98,7 @@ def get_recent(
     store = get_memory_store(user_id)
 
     memories = store.search_by_time(
+        user_id,
         days=days,
         platform=platform,
         media_type=media_type,
@@ -238,7 +240,7 @@ def update_importance(
     set_value: 直接设置值
     """
     store = get_memory_store(user_id)
-    memory = store.get(memory_id)
+    memory = store.get(memory_id, user_id)
     if not memory:
         return False
 
@@ -266,7 +268,7 @@ def find_related(memory_id: str, user_id: str, top_k: int = 5) -> QueryResult:
     # 先用 related_ids 快速返回
     related = []
     for rid in source.related_ids[:top_k]:
-        m = store.get(rid)
+        m = store.get(rid, user_id)
         if m:
             related.append((m, 0.9))
 
@@ -274,7 +276,7 @@ def find_related(memory_id: str, user_id: str, top_k: int = 5) -> QueryResult:
     if len(related) < top_k and source.summary:
         try:
             embedding = embedder.embed(source.summary)
-            vector_results = store.search_by_vector(embedding, top_k=top_k + 5)
+            vector_results = store.search_by_vector(embedding, user_id, top_k=top_k + 5)
             for m, score in vector_results:
                 if m.id != memory_id and not any(r.id == m.id for r, _ in related):
                     related.append((m, score))
@@ -293,7 +295,7 @@ def summarize_memories(memory_ids: List[str], user_id: str, llm_func=None) -> st
     MCP Tool: summarize_memories
     """
     store = get_memory_store(user_id)
-    memories = [store.get(mid) for mid in memory_ids if mid]
+    memories = [store.get(mid, user_id) for mid in memory_ids if mid]
     memories = [m for m in memories if m]
 
     if not memories:
@@ -333,12 +335,12 @@ def get_by_platform(
     if topic_query:
         try:
             embedding = embedder.embed(topic_query)
-            results = store.search_by_vector(embedding, top_k=limit * 2, platform_filter=platform)
+            results = store.search_by_vector(embedding, user_id, top_k=limit * 2, platform_filter=platform)
             topic_ids = [m.id for m, _ in results]
         except Exception:
             pass
 
-    memories = store.search_by_platform(platform, topic_query_ids=topic_ids, limit=limit)
+    memories = store.search_by_platform(platform, user_id, topic_query_ids=topic_ids, limit=limit)
     hits = [MemoryCard.from_memory(m) for m in memories]
 
     return QueryResult(
@@ -358,7 +360,7 @@ def get_by_tags(
     MCP Tool: get_by_tags
     """
     store = get_memory_store(user_id)
-    memories = store.search_by_tags(tags, match_mode=match_mode)
+    memories = store.search_by_tags(tags, user_id, match_mode=match_mode)
     hits = [MemoryCard.from_memory(m) for m in memories]
 
     return QueryResult(hits=hits, total_found=len(hits), query_intent="search")
@@ -370,7 +372,7 @@ def delete_memory(memory_id: str, user_id: str) -> bool:
     MCP Tool: delete_memory
     """
     store = get_memory_store(user_id)
-    return store.delete(memory_id)
+    return store.delete(memory_id, user_id)
 
 
 def get_stats(user_id: str, platform_filter: str = None) -> Dict[str, Any]:
@@ -379,7 +381,7 @@ def get_stats(user_id: str, platform_filter: str = None) -> Dict[str, Any]:
     MCP Tool: get_stats
     """
     store = get_memory_store(user_id)
-    return store.get_stats(platform_filter=platform_filter)
+    return store.get_stats(user_id, platform_filter=platform_filter)
 
 
 def sync_platform(platform: str, full_sync: bool = False, user_id: str = None) -> Dict[str, Any]:
