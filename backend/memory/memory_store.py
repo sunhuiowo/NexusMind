@@ -8,11 +8,25 @@ import json
 import logging
 import sqlite3
 import threading
+from contextvars import ContextVar
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
 
 import numpy as np
+
+# Context variable to store current user_id for request-scoped storage
+_current_user_id: ContextVar[Optional[str]] = ContextVar('current_user_id', default=None)
+
+
+def set_current_user(user_id: Optional[str]) -> None:
+    """设置当前请求的用户ID"""
+    _current_user_id.set(user_id)
+
+
+def get_current_user() -> Optional[str]:
+    """获取当前请求的用户ID"""
+    return _current_user_id.get()
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -27,13 +41,15 @@ _local = threading.local()
 
 
 def _get_db_conn(db_path: str) -> sqlite3.Connection:
-    """获取线程本地 SQLite 连接"""
-    if not hasattr(_local, "conn") or _local.conn is None:
-        _local.conn = sqlite3.connect(db_path, check_same_thread=False)
-        _local.conn.row_factory = sqlite3.Row
-        _local.conn.execute("PRAGMA journal_mode=WAL")
-        _local.conn.execute("PRAGMA synchronous=NORMAL")
-    return _local.conn
+    """获取线程本地 SQLite 连接（每个 db_path 独立连接）"""
+    # Store (conn, db_path) tuple to ensure we use correct connection for each db
+    if not hasattr(_local, "conn_info") or _local.conn_info is None or _local.conn_info[1] != db_path:
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        _local.conn_info = (conn, db_path)
+    return _local.conn_info[0]
 
 
 class MemoryStore:
@@ -592,12 +608,53 @@ class MemoryStore:
         }
 
 
-# ── 全局单例 ──────────────────────────────────────────────────────────────────
-_store_instance: Optional[MemoryStore] = None
+# ── 用户隔离的存储实例 ─────────────────────────────────────────────────────────
+# 每个用户有独立的 MemoryStore 实例，使用用户ID区分存储路径
+_stores: Dict[str, MemoryStore] = {}
 
 
-def get_memory_store() -> MemoryStore:
-    global _store_instance
-    if _store_instance is None:
-        _store_instance = MemoryStore()
-    return _store_instance
+def get_memory_store(user_id: str = None) -> MemoryStore:
+    """
+    获取指定用户的 MemoryStore 实例
+    如果 user_id 为 None，尝试从上下文变量获取，否则使用默认实例（向后兼容）
+    """
+    global _stores
+
+    # 如果没有提供 user_id，尝试从上下文变量获取
+    if not user_id:
+        user_id = get_current_user()
+
+    # 如果上下文中也没有用户ID，使用默认标识（向后兼容）
+    if not user_id:
+        user_id = "_default"
+
+    # 如果该用户的存储实例不存在，则创建
+    if user_id not in _stores:
+        # _default 用户使用原始数据库（向后兼容），其他用户使用独立的存储路径
+        if user_id == "_default":
+            # 使用原始的 memories.db 和 faiss_index（向后兼容）
+            user_db_path = config.METADATA_DB_PATH
+            user_faiss_path = str(config.VECTOR_DIR / "faiss_index")
+        else:
+            user_db_path = str(config.DATA_DIR / f"memories_{user_id}.db")
+            user_faiss_path = str(config.VECTOR_DIR / user_id / "index.faiss")
+
+        # 确保目录存在（FAISS目录和数据库目录）
+        Path(user_db_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(user_faiss_path).parent.mkdir(parents=True, exist_ok=True)
+
+        _stores[user_id] = MemoryStore(
+            faiss_path=user_faiss_path,
+            db_path=user_db_path,
+        )
+        logger.info(f"Created new MemoryStore for user: {user_id}, db_path: {user_db_path}")
+
+    return _stores[user_id]
+
+
+def clear_user_store(user_id: str) -> None:
+    """清除指定用户的存储实例和数据"""
+    global _stores
+    if user_id in _stores:
+        del _stores[user_id]
+        logger.info(f"Cleared MemoryStore for user: {user_id}")
