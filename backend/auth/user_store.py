@@ -10,7 +10,7 @@ import logging
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
 import bcrypt
 
@@ -300,20 +300,26 @@ class UserStore:
             for row in rows
         ]
 
-    def delete_user(self, user_id: str) -> bool:
+    def delete_user(self, user_id: str) -> Tuple[bool, Optional[str]]:
         """
         Delete user and all their sessions
 
         Returns:
-            True if user was deleted
-            False if user not found
+            Tuple of (success, error_message)
+            (True, None) if user was deleted
+            (False, "User not found") if user not found
+            (False, "Cannot delete admin user") if attempting to delete admin
         """
         conn = _get_db_conn(self._db_path)
 
-        # Check if user exists
-        user = conn.execute("SELECT id FROM users WHERE id = ?", (user_id,)).fetchone()
+        # Check if user exists and get is_admin flag
+        user = conn.execute("SELECT is_admin FROM users WHERE id = ?", (user_id,)).fetchone()
         if not user:
-            return False
+            return False, "User not found"
+
+        # Check if user is admin
+        if user[0]:  # is_admin
+            return False, "Cannot delete admin user"
 
         # Delete sessions first (foreign key constraint)
         conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
@@ -323,7 +329,7 @@ class UserStore:
         conn.commit()
 
         logger.info(f"[UserStore] User deleted: {user_id}")
-        return True
+        return True, None
 
 
 # ── Global singleton ─────────────────────────────────────────────────────────

@@ -8,6 +8,7 @@ import pytest
 import uuid
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -180,8 +181,9 @@ class TestUserStore(unittest.TestCase):
         session_id = login_result["session_id"]
 
         # 删除用户
-        result = self.store.delete_user(user_id)
+        result, error = self.store.delete_user(user_id)
         self.assertTrue(result, "删除用户应该返回成功")
+        self.assertIsNone(error, "删除用户不应有错误")
 
         # 用户应该不存在
         user = self.store.get_user(user_id)
@@ -195,3 +197,57 @@ class TestUserStore(unittest.TestCase):
         users = self.store.list_users()
         usernames = {u["username"] for u in users}
         self.assertNotIn("deleteuser", usernames)
+
+    def test_delete_admin_user_prevented(self):
+        """删除 admin 用户应该被阻止"""
+        import sqlite3
+
+        # 创建一个 admin 用户（直接插入数据库，因为 register_user 默认创建非 admin 用户）
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "INSERT INTO users (id, username, password_hash, is_admin, created_at) VALUES (?, ?, ?, ?, ?)",
+            ("admin_user_123", "adminuser", self.store._hash_password("password"), 1, datetime.now(timezone.utc).isoformat())
+        )
+        conn.commit()
+        conn.close()
+
+        # 尝试删除 admin 用户
+        result, error = self.store.delete_user("admin_user_123")
+
+        self.assertFalse(result, "删除 admin 用户应该返回失败")
+        self.assertEqual(error, "Cannot delete admin user", "应该返回正确的错误消息")
+
+        # admin 用户应该仍然存在
+        user = self.store.get_user("admin_user_123")
+        self.assertIsNotNone(user, "admin 用户不应该被删除")
+        self.assertTrue(user["is_admin"], "用户应该是 admin")
+
+    def test_validate_session_expired_auto_delete(self):
+        """Expired session should be deleted and return None"""
+        import sqlite3
+
+        # 注册用户
+        self.store.register_user("expireuser", "password")
+
+        # 直接在数据库中创建过期的 session
+        conn = sqlite3.connect(self.db_path)
+        user_row = conn.execute("SELECT id FROM users WHERE username = ?", ("expireuser",)).fetchone()
+        user_id = user_row[0]
+
+        expired_time = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        conn.execute(
+            "INSERT INTO sessions (id, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+            ("expired-session-id", user_id, datetime.now(timezone.utc).isoformat(), expired_time)
+        )
+        conn.commit()
+        conn.close()
+
+        # validate_session 应该删除过期 session 并返回 None
+        result = self.store.validate_session("expired-session-id")
+        self.assertIsNone(result, "过期 session 应该返回 None")
+
+        # 验证它已从数据库中删除
+        conn2 = sqlite3.connect(self.db_path)
+        remaining = conn2.execute("SELECT * FROM sessions WHERE id = ?", ("expired-session-id",)).fetchone()
+        conn2.close()
+        self.assertIsNone(remaining, "过期 session 应该从数据库中删除")
