@@ -309,9 +309,12 @@ def create_app():
 
     # ── Auth ───────────────────────────────────────────────────────────────
     @app.get("/auth/status")
-    async def auth_status():
+    async def auth_status(request: Request):
+        user_id = get_current_user()
+        if not user_id:
+            raise HTTPException(status_code=401, detail="请先登录")
         from auth.token_store import get_token_store
-        store = get_token_store()
+        store = get_token_store(user_id)
         return {p: store.get_status(p) for p in
                 ["youtube","twitter","github","pocket","bilibili","wechat","douyin","xiaohongshu"]}
 
