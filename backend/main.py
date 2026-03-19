@@ -19,12 +19,18 @@ except ImportError:
     pass
 
 import config
+from typing import Optional
+from fastapi import Request
+from starlette.middleware.base import BaseHTTPMiddleware
 
+
+from auth.session_middleware import SessionMiddleware, PUBLIC_PATHS
+from auth.user_store import get_user_store, set_current_user
 
 
 def create_app():
     try:
-        from fastapi import FastAPI, HTTPException, BackgroundTasks, Query
+        from fastapi import FastAPI, HTTPException, BackgroundTasks, Query, File, UploadFile
         from fastapi.middleware.cors import CORSMiddleware
         from pydantic import BaseModel
     except ImportError:
@@ -41,10 +47,90 @@ def create_app():
 
     app = FastAPI(title="Personal AI Memory System", version="1.2.0")
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+    # 添加用户隔离中间件
+    app.add_middleware(SessionMiddleware, public_paths=PUBLIC_PATHS)
 
     knowledge_agent = KnowledgeAgent()
     collector_agent = CollectorAgent()
     oauth_handler = get_oauth_handler()
+
+    # ── Auth (Session-based) ─────────────────────────────────────────────────
+
+    class RegisterRequest(BaseModel):
+        username: str
+        password: str
+
+    @app.post("/auth/register", status_code=201)
+    async def register(req: RegisterRequest):
+        store = get_user_store()
+        user_id, error = store.register_user(req.username, req.password)
+        if error:
+            raise HTTPException(status_code=400, detail=error)
+        return {"success": True, "user_id": user_id, "username": req.username}
+
+    @app.post("/auth/login")
+    async def login(req: RegisterRequest):
+        store = get_user_store()
+        result = store.login_user(req.username, req.password)
+        if result is None:
+            raise HTTPException(status_code=401, detail="Invalid username or password")
+        return {"success": True, **result}
+
+    @app.post("/auth/logout")
+    async def logout(request: Request):
+        session_id = request.headers.get("x-session-id")
+        if session_id:
+            store = get_user_store()
+            store.logout_user(session_id)
+        return {"success": True}
+
+    @app.get("/auth/me")
+    async def get_me(request: Request):
+        session_id = request.headers.get("x-session-id")
+        if not session_id:
+            raise HTTPException(status_code=401, detail="请先登录")
+        store = get_user_store()
+        user_id = store.validate_session(session_id)
+        if not user_id:
+            raise HTTPException(status_code=401, detail="会话已过期，请重新登录")
+        user = store.get_user(user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="用户不存在")
+        return user
+
+    # ── Admin ───────────────────────────────────────────────────────────────
+
+    @app.get("/admin/users")
+    async def list_users(request: Request):
+        session_id = request.headers.get("x-session-id")
+        if not session_id:
+            raise HTTPException(status_code=401, detail="请先登录")
+        store = get_user_store()
+        user_id = store.validate_session(session_id)
+        if not user_id:
+            raise HTTPException(status_code=401, detail="会话已过期，请重新登录")
+        user = store.get_user(user_id)
+        if not user or not user.get("is_admin"):
+            raise HTTPException(status_code=403, detail="需要管理员权限")
+        users = store.list_users()
+        return {"users": users}
+
+    @app.delete("/admin/users/{user_id}")
+    async def delete_user(user_id: str, request: Request):
+        session_id = request.headers.get("x-session-id")
+        if not session_id:
+            raise HTTPException(status_code=401, detail="请先登录")
+        store = get_user_store()
+        current_user_id = store.validate_session(session_id)
+        if not current_user_id:
+            raise HTTPException(status_code=401, detail="会话已过期，请重新登录")
+        current_user = store.get_user(current_user_id)
+        if not current_user or not current_user.get("is_admin"):
+            raise HTTPException(status_code=403, detail="需要管理员权限")
+        success, error = store.delete_user(user_id)
+        if not success:
+            raise HTTPException(status_code=400, detail=error)
+        return {"success": True}
 
     # ── Query ──────────────────────────────────────────────────────────────
     class QueryRequest(BaseModel):
@@ -69,6 +155,7 @@ def create_app():
     # ── Memories list (真实分页+过滤) ──────────────────────────────────────
     @app.get("/memories")
     async def list_memories(
+        request: Request,
         platform: Optional[str] = None,
         media_type: Optional[str] = None,
         days: Optional[int] = None,
@@ -82,7 +169,8 @@ def create_app():
         from memory.memory_schema import Memory, MemoryCard
         from datetime import datetime, timedelta
 
-        store = get_memory_store()
+        user_id = get_user_id_from_request(request)
+        store = get_memory_store(user_id)
 
         if query and query.strip():
             embedder = get_embedder()
@@ -102,7 +190,8 @@ def create_app():
                 logger.warning(f"[API] vector search failed: {e}")
                 return {"items": [], "total": 0, "page": page, "page_size": page_size, "has_more": False}
 
-        db = config.METADATA_DB_PATH
+        # Use user-specific database path from the store
+        db = store._db_path
         conn = sqlite3.connect(db)
         conn.row_factory = sqlite3.Row
 
@@ -144,12 +233,14 @@ def create_app():
                 "has_more": (page * page_size) < total}
 
     @app.get("/memories/stats")
-    async def stats_endpoint(platform: Optional[str] = None):
-        return get_stats(platform_filter=platform)
+    async def stats_endpoint(request: Request, platform: Optional[str] = None):
+        user_id = get_user_id_from_request(request)
+        return get_stats(platform_filter=platform, user_id=user_id)
 
     @app.get("/memories/{memory_id}")
-    async def get_memory(memory_id: str):
-        store = get_memory_store()
+    async def get_memory(request: Request, memory_id: str):
+        user_id = get_user_id_from_request(request)
+        store = get_memory_store(user_id)
         m = store.get(memory_id)
         if not m:
             raise HTTPException(status_code=404, detail="记忆不存在")
@@ -191,27 +282,29 @@ def create_app():
         full_sync: bool = False
 
     @app.post("/sync")
-    async def sync_endpoint(req: SyncRequest, background_tasks: BackgroundTasks):
+    async def sync_endpoint(req: SyncRequest, background_tasks: BackgroundTasks, request: Request):
+        user_id = get_user_id_from_request(request)
         if req.platform:
-            background_tasks.add_task(collector_agent.sync_single_platform, req.platform, req.full_sync)
+            background_tasks.add_task(collector_agent.sync_single_platform, req.platform, req.full_sync, user_id)
             return {"message": f"已启动 {req.platform} 同步"}
-        background_tasks.add_task(collector_agent.sync_all_platforms, req.full_sync)
+        background_tasks.add_task(collector_agent.sync_all_platforms, req.full_sync, user_id)
         return {"message": "已启动全平台同步"}
 
     class ResyncRequest(BaseModel):
         platform: Optional[str] = None
 
     @app.post("/resync")
-    async def resync_endpoint(req: ResyncRequest, background_tasks: BackgroundTasks):
+    async def resync_endpoint(req: ResyncRequest, background_tasks: BackgroundTasks, request: Request):
         """
         重新同步接口 - 先删除数据，再执行全量同步
         - 指定 platform: 仅重新同步该平台
         - 不指定 platform: 重新同步所有平台
         """
+        user_id = get_user_id_from_request(request)
         if req.platform:
-            background_tasks.add_task(collector_agent.resync_platform, req.platform)
+            background_tasks.add_task(collector_agent.resync_platform, req.platform, user_id)
             return {"message": f"已启动 {req.platform} 重新同步（先删除后全量同步）"}
-        background_tasks.add_task(collector_agent.resync_all_platforms)
+        background_tasks.add_task(collector_agent.resync_all_platforms, user_id)
         return {"message": "已启动全平台重新同步（先删除后全量同步）"}
 
     # ── Auth ───────────────────────────────────────────────────────────────
@@ -327,6 +420,29 @@ def create_app():
     @app.get("/config/test-embedding")
     async def test_embedding():
         return get_embedder().test_connection()
+
+    # ── File Upload ─────────────────────────────────────────────────────
+    @app.post("/upload")
+    async def upload_file(file: UploadFile = File(...)):
+        """Upload a file"""
+        import tempfile
+        import os
+
+        # Save to temp file
+        suffix = Path(file.filename).suffix if file.filename else ""
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            content = await file.read()
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        logger.info(f"Uploaded file: {file.filename}, size: {len(content)} bytes")
+
+        return {
+            "success": True,
+            "filename": file.filename,
+            "size": len(content),
+            "type": file.content_type or "application/octet-stream"
+        }
 
     # ── Health ─────────────────────────────────────────────────────────────
     @app.get("/health")
