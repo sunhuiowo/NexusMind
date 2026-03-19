@@ -412,6 +412,61 @@ class UserStore:
         logger.info(f"[UserStore] User deleted: {user_id}")
         return True, None
 
+    def delete_user_cascade(self, user_id: str) -> Tuple[bool, Optional[str]]:
+        """
+        Delete user and ALL their data (cascade delete).
+        Returns (success, error_message).
+        """
+        import shutil
+        from pathlib import Path
+
+        conn = _get_db_conn(self._db_path)
+
+        # Check user exists and is not admin
+        user = conn.execute("SELECT is_admin FROM users WHERE id = ?", (user_id,)).fetchone()
+        if not user:
+            return False, "User not found"
+        if user[0]:
+            return False, "Cannot delete admin user"
+
+        # Clear in-memory stores (important!)
+        from memory.memory_store import _stores as memory_stores
+        from auth.token_store import _token_stores as token_stores
+        memory_stores.pop(user_id, None)
+        token_stores.pop(user_id, None)
+
+        # Delete sessions
+        conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+
+        # Delete impersonation tokens (where admin or target)
+        conn.execute("DELETE FROM impersonation_tokens WHERE admin_user_id = ? OR target_user_id = ?",
+                     (user_id, user_id))
+
+        # Delete user
+        conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        conn.commit()
+
+        # Delete storage files
+        from config import DATA_DIR
+
+        # Delete memories DB
+        mem_db = DATA_DIR / f"memories_{user_id}.db"
+        if mem_db.exists():
+            mem_db.unlink()
+
+        # Delete FAISS index directory
+        faiss_dir = DATA_DIR / "vectors" / user_id
+        if faiss_dir.exists():
+            shutil.rmtree(faiss_dir)
+
+        # Delete auth tokens directory
+        auth_dir = DATA_DIR / "auth" / user_id
+        if auth_dir.exists():
+            shutil.rmtree(auth_dir)
+
+        logger.info(f"[UserStore] Cascade deleted user: {user_id}")
+        return True, None
+
 
 # ── Global singleton ─────────────────────────────────────────────────────────
 _user_store: Optional[UserStore] = None
