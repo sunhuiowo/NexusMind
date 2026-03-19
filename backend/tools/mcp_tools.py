@@ -31,6 +31,7 @@ def _get_embedder():
 
 def search_memory(
     query: str,
+    user_id: str,
     top_k: int = None,
     min_importance: float = 0.0,
     platform_filter: str = None,
@@ -42,7 +43,7 @@ def search_memory(
     MCP Tool: search_memory
     """
     top_k = top_k or config.TOP_K_RESULTS
-    store = get_memory_store()
+    store = get_memory_store(user_id)
     embedder = _get_embedder()
 
     try:
@@ -82,6 +83,7 @@ def search_memory(
 
 
 def get_recent(
+    user_id: str,
     days: int = 7,
     platform: str = None,
     media_type: str = None,
@@ -92,7 +94,7 @@ def get_recent(
     MCP Tool: get_recent
     """
     limit = limit or config.TOP_K_RESULTS
-    store = get_memory_store()
+    store = get_memory_store(user_id)
 
     memories = store.search_by_time(
         days=days,
@@ -116,19 +118,21 @@ def get_recent(
     )
 
 
-def add_memory(raw_content: RawContent, llm_func=None) -> Optional[str]:
+def add_memory(raw_content: RawContent, user_id: str, llm_func=None) -> Optional[str]:
     """
     新增记忆入库
     MCP Tool: add_memory
     返回入库的 memory_id，已存在返回 None
     """
     from tools.memory_builder import build_memory_from_content
-    store = get_memory_store()
+    store = get_memory_store(user_id)
     embedder = _get_embedder()
 
     memory = build_memory_from_content(raw_content, llm_func=llm_func)
     if not memory:
         return None
+
+    memory.user_id = user_id
 
     # 生成 embedding（基于 summary，原则 2）
     if memory.summary:
@@ -143,6 +147,7 @@ def add_memory(raw_content: RawContent, llm_func=None) -> Optional[str]:
 
 def add_memories_batch(
     raw_contents: List[RawContent],
+    user_id: str,
     llm_func=None,
     max_workers: int = 4,
 ) -> List[Optional[str]]:
@@ -164,7 +169,7 @@ def add_memories_batch(
     if not raw_contents:
         return []
 
-    store = get_memory_store()
+    store = get_memory_store(user_id)
     embedder = _get_embedder()
 
     # 并行构建 memory 对象
@@ -222,6 +227,7 @@ def add_memories_batch(
 
 def update_importance(
     memory_id: str,
+    user_id: str,
     delta: float = None,
     set_value: float = None,
 ) -> bool:
@@ -231,7 +237,7 @@ def update_importance(
     delta: 增减量（+/-）
     set_value: 直接设置值
     """
-    store = get_memory_store()
+    store = get_memory_store(user_id)
     memory = store.get(memory_id)
     if not memory:
         return False
@@ -245,12 +251,12 @@ def update_importance(
     return store.update(memory)
 
 
-def find_related(memory_id: str, top_k: int = 5) -> QueryResult:
+def find_related(memory_id: str, user_id: str, top_k: int = 5) -> QueryResult:
     """
     查找关联记忆
     MCP Tool: find_related
     """
-    store = get_memory_store()
+    store = get_memory_store(user_id)
     embedder = _get_embedder()
 
     source = store.get(memory_id)
@@ -281,12 +287,12 @@ def find_related(memory_id: str, top_k: int = 5) -> QueryResult:
     return QueryResult(hits=hits, total_found=len(hits), query_intent="related")
 
 
-def summarize_memories(memory_ids: List[str], llm_func=None) -> str:
+def summarize_memories(memory_ids: List[str], user_id: str, llm_func=None) -> str:
     """
     批量总结多条记忆
     MCP Tool: summarize_memories
     """
-    store = get_memory_store()
+    store = get_memory_store(user_id)
     memories = [store.get(mid) for mid in memory_ids if mid]
     memories = [m for m in memories if m]
 
@@ -311,6 +317,7 @@ def summarize_memories(memory_ids: List[str], llm_func=None) -> str:
 
 def get_by_platform(
     platform: str,
+    user_id: str,
     topic_query: str = None,
     limit: int = None,
 ) -> QueryResult:
@@ -319,7 +326,7 @@ def get_by_platform(
     MCP Tool: get_by_platform
     """
     limit = limit or config.TOP_K_RESULTS
-    store = get_memory_store()
+    store = get_memory_store(user_id)
     embedder = _get_embedder()
 
     topic_ids = None
@@ -343,35 +350,35 @@ def get_by_platform(
 
 def get_by_tags(
     tags: List[str],
+    user_id: str,
     match_mode: str = "any",  # any / all
 ) -> QueryResult:
     """
     按标签过滤
     MCP Tool: get_by_tags
     """
-    store = get_memory_store()
+    store = get_memory_store(user_id)
     memories = store.search_by_tags(tags, match_mode=match_mode)
     hits = [MemoryCard.from_memory(m) for m in memories]
 
     return QueryResult(hits=hits, total_found=len(hits), query_intent="search")
 
 
-def delete_memory(memory_id: str) -> bool:
+def delete_memory(memory_id: str, user_id: str) -> bool:
     """
     删除记忆
     MCP Tool: delete_memory
     """
-    store = get_memory_store()
+    store = get_memory_store(user_id)
     return store.delete(memory_id)
 
 
-def get_stats(platform_filter: str = None, user_id: str = None) -> Dict[str, Any]:
+def get_stats(user_id: str, platform_filter: str = None) -> Dict[str, Any]:
     """
     统计信息
     MCP Tool: get_stats
-    注意: user_id 参数现在主要作为备用,主要从上下文获取
     """
-    store = get_memory_store(user_id)  # 会自动从上下文获取user_id
+    store = get_memory_store(user_id)
     return store.get_stats(platform_filter=platform_filter)
 
 
