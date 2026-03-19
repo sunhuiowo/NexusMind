@@ -1,251 +1,273 @@
-# 用户隔离系统设计文档
+# Multi-Tenant User Isolation Design
 
-**日期**: 2026-03-19
-**主题**: 多用户隔离认证与数据隔离系统
-
----
-
-## 1. 概述
-
-### 目标
-实现完整的多用户隔离系统，确保：
-- 每个注册用户有独立的认证、记忆库、平台凭证
-- 只有认证用户才能访问系统
-- 管理员可管理所有用户
-
-### 架构概览
-
-```
-前端 → 后端API → SessionMiddleware → 用户上下文 → 隔离执行
-         ↓
-    SQLite: users + sessions 表
-    TokenStore: auth/{user_id}/
-    MemoryStore: memories_{user_id}.db + faiss/{user_id}/
-```
+**Date**: 2026-03-19
+**Status**: Approved for implementation
 
 ---
 
-## 2. 数据库设计
+## 1. Overview
 
-### 存储位置
-`data/users.db`
+**Goal**: Complete data isolation between users, with a super admin that can manage users and impersonate them via audited tokens.
 
-### 表结构
+**Core principle**: `user_id` must be present in every data operation. No `user_id` = no operation = error.
 
-#### users 表
+**Architecture**: RBAC + Multi-Tenant Isolation + Impersonation (auditable)
+
+---
+
+## 2. Data Model Changes
+
+### 2.1 Schema Changes (SQLite)
+
+All tables **must** have `user_id TEXT NOT NULL`. Tables to modify:
+
+| Table | Change |
+|-------|--------|
+| `memories` | Add `user_id TEXT NOT NULL` field |
+| `oauth_tokens` | Add explicit `user_id` column (storage path already per-user) |
+| `platform_accounts` | Add `user_id TEXT NOT NULL` |
+| `tasks` | Add `user_id TEXT NOT NULL` |
+| `logs` | Add `user_id TEXT NOT NULL` |
+
+### 2.2 New Tables
+
 ```sql
+-- Users: is_admin=True for super admin
 CREATE TABLE users (
-    id TEXT PRIMARY KEY,           -- user_xxx 格式
-    username TEXT UNIQUE NOT NULL, -- 用户名
-    password_hash TEXT NOT NULL,   -- bcrypt 哈希
-    is_admin INTEGER DEFAULT 0,    -- 是否管理员
-    created_at TEXT NOT NULL       -- ISO 8601 时间戳
+    id TEXT PRIMARY KEY,
+    username TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    is_admin INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL
 );
-```
 
-#### sessions 表
-```sql
+-- Sessions (existing)
 CREATE TABLE sessions (
-    session_id TEXT PRIMARY KEY,   -- 随机 UUID
-    user_id TEXT NOT NULL,         -- 关联 users.id
-    created_at TEXT NOT NULL,      -- 创建时间
-    expires_at TEXT NOT NULL,      -- 过期时间
+    session_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
+
+-- Impersonation tokens for admin delegation
+CREATE TABLE impersonation_tokens (
+    id TEXT PRIMARY KEY,
+    admin_user_id TEXT NOT NULL,
+    target_user_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    audit_log TEXT,
+    FOREIGN KEY (admin_user_id) REFERENCES users(id),
+    FOREIGN KEY (target_user_id) REFERENCES users(id)
+);
+
+-- Audit log for admin actions
+CREATE TABLE admin_audit_logs (
+    id TEXT PRIMARY KEY,
+    admin_user_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    target_user_id TEXT,
+    details TEXT,
+    created_at TEXT NOT NULL
+);
 ```
+
+### 2.3 Storage Path Changes
+
+Current: Per-user storage at path level (`memories_{user_id}.db`, `vectors/{user_id}/`)
+After: User data stays in per-user paths, but **all data records also carry `user_id`** for query-level enforcement.
+
+### 2.4 Migration Strategy
+
+- Existing per-user files already have path-level isolation
+- Migration script walks existing files and backfills `user_id` column
+- Old data migrates to the user who owns that storage path
+- `user_id=NULL` is never allowed
 
 ---
 
-## 3. API 设计
+## 3. Request Lifecycle
 
-### 认证端点
+### 3.1 Session Middleware
 
-| 端点 | 方法 | 说明 | 认证要求 |
-|---|---|---|---|
-| `/auth/register` | POST | 注册新用户 | 无 |
-| `/auth/login` | POST | 登录 | 无 |
-| `/auth/logout` | POST | 登出 | 需要 |
-| `/auth/me` | GET | 获取当前用户信息 | 需要 |
-
-### 请求/响应格式
-
-#### POST /auth/register
-```json
-// Request
-{ "username": "string", "password": "string" }
-
-// Response 201
-{ "success": true, "user_id": "user_xxx", "username": "xxx" }
-
-// Response 400
-{ "success": false, "error": "用户名已存在" }
+```
+Request (X-Session-Id header OR session cookie)
+→ Decode session_id from sessions table
+→ Lookup user_id
+→ Check impersonation_tokens for active impersonation (X-Impersonation-Token header)
+→ Set request.state.user_id
+→ Set request.state.is_impersonating (bool)
+→ Set request.state.admin_user_id (if impersonating)
+→ Proceed
 ```
 
-#### POST /auth/login
-```json
-// Request
-{ "username": "string", "password": "string" }
+### 3.2 Impersonation Flow
 
-// Response 200
+1. Admin calls `POST /admin/impersonate/{target_user_id}`
+2. System creates `impersonation_tokens` record with expiry
+3. Returns impersonation token to admin
+4. Admin sends subsequent requests with `X-Impersonation-Token: {token}` header
+5. Middleware detects impersonation token → uses `target_user_id` as `request.state.user_id`
+6. All operations tagged with `admin_user_id` in audit log
+7. Admin calls `DELETE /admin/impersonate` or token expires → impersonation ends
+
+### 3.3 Authorization Rules
+
+| Role | Can Do |
+|------|--------|
+| Regular user | Own data only (user_id enforced) |
+| Admin | Manage users, impersonate, view audit logs |
+| Impersonating admin | Target user's data, all actions logged |
+
+### 3.4 No Implicit Fallback
+
+**Critical rule**: `request.state.user_id` **must** be set. If missing → 401 Unauthorized. No fallback to "default" or "anonymous".
+
+---
+
+## 4. Component Changes
+
+### 4.1 OAuthHandler (`backend/auth/oauth_handler.py`)
+
+**Current bug**: Global singleton, uses default TokenStore
+**Fix**: Accept `user_id` explicitly on each method call
+
+```python
+# Before (broken)
+oauth_handler = get_oauth_handler()
+oauth_handler.start_flow(platform, redirect_uri)
+
+# After (fixed)
+oauth_handler = OAuthHandler()  # No global singleton
+oauth_handler.start_flow(platform, user_id, redirect_uri)
+```
+
+### 4.2 CollectorAgent (`backend/agents/collector_agent.py`)
+
+**Current bug**: `get_token_store()` called without `user_id` for Bilibili
+**Fix**: All methods require `user_id` parameter, passed explicitly
+
+```python
+# Before (broken)
+token_store = get_token_store()
+token_data = token_store.load("bilibili")
+
+# After (fixed)
+token_store = get_token_store(user_id)
+token_data = token_store.load("bilibili")
+```
+
+### 4.3 MemoryAgent (`backend/agents/memory_agent.py`)
+
+**Current bug**: Uses `get_memory_store()` without user_id (defaults to `_default`)
+**Fix**: Accept `user_id` in constructor or per-method. For background tasks, spawn per-user agents.
+
+### 4.4 MCP Tools (`backend/tools/mcp_tools.py`)
+
+**Current bug**: Relies on ContextVar which may not propagate in background tasks
+**Fix**: All tool functions accept explicit `user_id` parameter
+
+```python
+# Before (broken)
+def search_memory(query: str) -> QueryResult:
+    store = get_memory_store()
+
+# After (fixed)
+def search_memory(query: str, user_id: str) -> QueryResult:
+    store = get_memory_store(user_id)
+```
+
+### 4.5 KnowledgeAgent (`backend/agents/knowledge_agent.py`)
+
+**Fix**: All methods receive `user_id` explicitly, no implicit context lookup.
+
+### 4.6 All API Endpoints
+
+Every endpoint that reads/writes data must use `request.state.user_id`. No exceptions.
+
+---
+
+## 5. Admin Features
+
+### 5.1 User Management Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/admin/users` | GET | List all users |
+| `/admin/users` | POST | Create new user |
+| `/admin/users/{user_id}` | DELETE | Delete user + all their data |
+| `/admin/impersonate/{user_id}` | POST | Start impersonation, returns token |
+| `/admin/impersonate` | DELETE | End impersonation |
+| `/admin/audit-logs` | GET | View audit logs |
+
+### 5.2 Delete User Cascade
+
+When deleting a user:
+
+1. Delete from `sessions` table
+2. Delete from `impersonation_tokens` table (where admin or target)
+3. Delete file: `backend/data/memories_{user_id}.db`
+4. Delete directory: `backend/data/vectors/{user_id}/`
+5. Delete directory: `backend/data/auth/{user_id}/`
+6. Record deletion in `admin_audit_logs`
+
+### 5.3 Audit Logging
+
+Every admin action is logged:
+
+```json
 {
-  "success": true,
-  "session_id": "uuid",
-  "user_id": "user_xxx",
-  "username": "xxx",
-  "is_admin": false
-}
-
-// Response 401
-{ "success": false, "error": "用户名或密码错误" }
-```
-
-#### GET /auth/me
-```json
-// Response 200
-{ "user_id": "user_xxx", "username": "xxx", "is_admin": false }
-
-// Response 401
-{ "error": "未登录" }
-```
-
-### 管理员端点
-
-| 端点 | 方法 | 说明 | 认证要求 |
-|---|---|---|---|
-| `/admin/users` | GET | 用户列表 | 管理员 |
-| `/admin/users/{id}` | DELETE | 删除用户 | 管理员 |
-
-#### GET /admin/users
-```json
-// Response 200
-{
-  "users": [
-    { "id": "user_xxx", "username": "xxx", "is_admin": false, "created_at": "..." },
-    ...
-  ]
+  "action": "impersonate_start",
+  "admin_user_id": "admin_abc",
+  "target_user_id": "user_xyz",
+  "timestamp": "2026-03-19T10:00:00Z",
+  "ip": "127.0.0.1"
 }
 ```
 
-#### DELETE /admin/users/{id}
-```json
-// Response 200
-{ "success": true }
+Impersonation audit includes every action taken while impersonating.
 
-// Response 400
-{ "success": false, "error": "无法删除管理员账户" }
+---
+
+## 6. File Structure Changes
+
+```
+backend/
+├── auth/
+│   ├── user_store.py          # Add: delete_user_cascade, admin audit
+│   ├── session_middleware.py # Add: impersonation token handling
+│   └── impersonation.py      # NEW: impersonation token management
+├── memory/
+│   ├── memory_store.py        # Enforce user_id on all operations
+│   ├── memory_schema.py       # Add user_id to Memory dataclass
+│   └── migrations/            # NEW: migration scripts
+├── agents/
+│   ├── collector_agent.py    # Fix: pass user_id everywhere
+│   ├── knowledge_agent.py     # Fix: pass user_id everywhere
+│   └── memory_agent.py        # Fix: per-user instances
+├── tools/
+│   └── mcp_tools.py           # Fix: explicit user_id parameter
+├── platforms/                 # Review all for user_id consistency
+├── routers/
+│   ├── admin.py               # NEW: admin endpoints
+│   └── ... (existing)
+└── main.py                    # Wire admin router
 ```
 
 ---
 
-## 4. 会话管理
+## 7. Verification Checklist
 
-### Session 中间件流程
+Before claiming completion, verify:
 
-```
-1. 请求进入
-2. 检查是否需要认证（白名单：/auth/register, /auth/login, /health）
-3. 获取 session_id（从 header X-Session-Id 或 Cookie）
-4. 查询 sessions 表验证
-5. 验证失败 → 返回 401
-6. 验证成功 → 设置 user_id 到 ContextVar
-7. 调用下一个处理器
-8. 请求结束后清理上下文
-```
-
-### Session 过期
-- 默认 7 天过期
-- 每次有效请求刷新过期时间
-
----
-
-## 5. 数据隔离
-
-### 存储路径结构
-
-```
-data/
-├── users.db                    # 用户和会话数据
-├── memories.db                # (向后兼容) 默认用户数据
-├── faiss_index.index           # (向后兼容) 默认向量索引
-└── auth/
-    ├── youtube_tokens.enc      # (向后兼容) 默认凭证
-    └── {user_id}/
-        ├── memories_{user_id}.db
-        ├── faiss/
-        │   └── {user_id}/
-        │       └── index.faiss
-        └── {platform}_tokens.enc
-```
-
-### 各模块隔离
-
-| 模块 | 隔离方式 |
-|---|---|
-| MemoryStore | `get_memory_store(user_id)` → 独立 DB + FAISS |
-| TokenStore | `get_token_store(user_id)` → 独立加密文件 |
-| 会话 | sessions 表按 user_id 索引 |
-
----
-
-## 6. 修改现有代码
-
-### 6.1 新增文件
-
-- `backend/auth/user_store.py` - 用户和会话管理
-- `backend/auth/session_middleware.py` - Session 验证中间件
-
-### 6.2 修改文件
-
-| 文件 | 修改内容 |
-|---|---|
-| `backend/main.py` | 替换 UserIsolationMiddleware 为 SessionMiddleware |
-| `backend/auth/token_store.py` | 确保 get_token_store(user_id) 正确工作 |
-| `backend/tools/mcp_tools.py` | sync_platform 增加 user_id 参数 |
-| `frontend/src/api/apiClient.ts` | 移除 X-User-Id，改为 X-Session-Id |
-| `frontend/src/store/index.ts` | Auth store 改为调用后端 API |
-
-### 6.3 删除/废弃
-
-- `UserIsolationMiddleware` 中的 X-User-Id header 解析逻辑
-
----
-
-## 7. 错误处理
-
-| 场景 | 响应 |
-|---|---|
-| 未登录访问受保护资源 | 401 `{ "error": "请先登录" }` |
-| Session 过期 | 401 `{ "error": "会话已过期，请重新登录" }` |
-| 无权限（管理员操作） | 403 `{ "error": "需要管理员权限" }` |
-| 用户不存在 | 404 `{ "error": "用户不存在" }` |
-
----
-
-## 8. 实施步骤
-
-### Phase 1: 基础架构
-1. 创建 `user_store.py` - 用户注册、登录、session 管理
-2. 创建 `session_middleware.py` - 会话验证中间件
-3. 修改 `main.py` - 集成新中间件和 API
-
-### Phase 2: 前端集成
-1. 修改 `apiClient.ts` - 使用 session_id
-2. 修改 Auth store - 调用后端 API
-3. 添加注册/登录页面
-
-### Phase 3: 完善隔离
-1. 确保所有 API 正确传递 session
-2. 修改 MCP 工具支持 user_id
-3. 后台任务正确传递用户上下文
-
-### Phase 4: 管理员功能
-1. 添加 `/admin/*` 端点
-2. 前端管理员界面（可选）
-
----
-
-## 9. 向后兼容
-
-- 没有 user_id 的请求默认使用 `_default` 用户
-- CLI 命令继续使用默认存储
-- 现有数据不受影响
+- [ ] Every SQLite INSERT has `user_id`
+- [ ] Every SQLite query filters by `user_id`
+- [ ] `get_memory_store(user_id)` is called everywhere (no bare `get_memory_store()`)
+- [ ] `get_token_store(user_id)` is called everywhere (no bare `get_token_store()`)
+- [ ] OAuth callback stores tokens in correct user's store
+- [ ] Impersonation creates audit log entry
+- [ ] Delete user removes all storage files
+- [ ] New users cannot see other users' data
+- [ ] No `request.state.user_id` is `None` after middleware
+- [ ] ContextVar is removed as fallback mechanism
