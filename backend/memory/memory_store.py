@@ -213,12 +213,6 @@ class MemoryStore:
             defer_commit: 是否延迟 commit（用于批量操作，减少 IO）
         """
         with self._lock:
-            # 确保 user_id 已设置
-            if not memory.user_id:
-                memory.user_id = get_current_user() or "_default"
-                if memory.user_id == "_default":
-                    logger.warning(f"[MemoryStore] Memory saved with user_id='_default' (no user context)")
-
             if not memory.id:
                 import uuid
                 memory.id = str(uuid.uuid4())
@@ -278,12 +272,6 @@ class MemoryStore:
             conn = _get_db_conn(self._db_path)
 
             for memory in memories:
-                # 确保 user_id 已设置
-                if not memory.user_id:
-                    memory.user_id = get_current_user() or "_default"
-                    if memory.user_id == "_default":
-                        logger.warning(f"[MemoryStore] Memory {memory.id} saved with user_id='_default' (no user context)")
-
                 if not memory.id:
                     import uuid
                     memory.id = str(uuid.uuid4())
@@ -326,8 +314,6 @@ class MemoryStore:
     def update(self, memory: Memory) -> bool:
         """更新记忆元数据（不更新 embedding）"""
         with self._lock:
-            if not memory.user_id:
-                memory.user_id = get_current_user() or "_default"
             conn = _get_db_conn(self._db_path)
             conn.execute("""
                 UPDATE memories SET
@@ -348,10 +334,8 @@ class MemoryStore:
             conn.commit()
             return conn.execute("SELECT changes()").fetchone()[0] > 0
 
-    def delete(self, memory_id: str, user_id: str = "") -> bool:
+    def delete(self, memory_id: str, user_id: str) -> bool:
         """删除记忆（SQLite 删除，FAISS 标记废弃）"""
-        if not user_id:
-            user_id = get_current_user()
         with self._lock:
             conn = _get_db_conn(self._db_path)
             conn.execute("DELETE FROM memories WHERE id=? AND user_id=?", (memory_id, user_id))
@@ -391,20 +375,16 @@ class MemoryStore:
                 logger.error(f"[MemoryStore] 清空数据失败: {e}")
                 return False
 
-    def get(self, memory_id: str, user_id: str = "") -> Optional[Memory]:
+    def get(self, memory_id: str, user_id: str) -> Optional[Memory]:
         """按 ID 查询记忆"""
-        if not user_id:
-            user_id = get_current_user()
         conn = _get_db_conn(self._db_path)
         row = conn.execute("SELECT * FROM memories WHERE id=? AND user_id=?", (memory_id, user_id)).fetchone()
         return self._row_to_memory(row) if row else None
 
-    def exists_by_platform_id(self, platform: str, platform_id: str, user_id: str = "") -> bool:
+    def exists_by_platform_id(self, platform: str, platform_id: str, user_id: str) -> bool:
         """按平台 + 平台侧 ID 去重查询"""
         conn = _get_db_conn(self._db_path)
         # Lazy init: if this is a new thread connection, table might not exist yet
-        if not user_id:
-            user_id = get_current_user()
         try:
             row = conn.execute(
                 "SELECT id FROM memories WHERE platform=? AND platform_id=? AND user_id=?",
@@ -426,6 +406,7 @@ class MemoryStore:
     def search_by_vector(
         self,
         query_embedding: List[float],
+        user_id: str,
         query_text: str = None,  # 原始查询文本，用于关键词匹配
         top_k: int = None,
         platform_filter: str = None,
@@ -438,7 +419,6 @@ class MemoryStore:
         返回 [(Memory, relevance_score), ...] 按相关度排序
         """
         top_k = top_k or config.TOP_K_RESULTS
-        user_id = get_current_user()
 
         if self._index is None or self._index.ntotal == 0:
             logger.warning("[MemoryStore] FAISS 索引为空")
@@ -510,6 +490,7 @@ class MemoryStore:
 
     def search_by_time(
         self,
+        user_id: str,
         days: int = 7,
         platform: str = None,
         media_type: str = None,
@@ -518,7 +499,6 @@ class MemoryStore:
         """按时间倒序查询"""
         limit = limit or config.TOP_K_RESULTS
         cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
-        user_id = get_current_user()
 
         conn = _get_db_conn(self._db_path)
         query = "SELECT * FROM memories WHERE bookmarked_at >= ? AND user_id=?"
@@ -540,12 +520,12 @@ class MemoryStore:
     def search_by_platform(
         self,
         platform: str,
+        user_id: str,
         topic_query_ids: List[str] = None,
         limit: int = None,
     ) -> List[Memory]:
         """按平台过滤查询"""
         limit = limit or config.TOP_K_RESULTS
-        user_id = get_current_user()
         conn = _get_db_conn(self._db_path)
 
         if topic_query_ids:
@@ -565,12 +545,12 @@ class MemoryStore:
     def search_by_tags(
         self,
         tags: List[str],
+        user_id: str,
         match_mode: str = "any",  # any / all
         limit: int = None,
     ) -> List[Memory]:
         """按标签查询"""
         limit = limit or config.TOP_K_RESULTS
-        user_id = get_current_user()
         conn = _get_db_conn(self._db_path)
 
         # SQLite JSON 查询标签（使用 LIKE 模糊匹配）
@@ -598,11 +578,11 @@ class MemoryStore:
 
     def get_all_for_update(
         self,
+        user_id: str,
         last_accessed_before_days: int = 30,
     ) -> List[Memory]:
         """获取需要重要性更新的记忆"""
         cutoff = (datetime.utcnow() - timedelta(days=last_accessed_before_days)).isoformat()
-        user_id = get_current_user()
         conn = _get_db_conn(self._db_path)
         rows = conn.execute(
             """SELECT * FROM memories
@@ -612,10 +592,8 @@ class MemoryStore:
         ).fetchall()
         return [self._row_to_memory(r) for r in rows]
 
-    def increment_query_count(self, memory_id: str, user_id: str = "") -> None:
+    def increment_query_count(self, memory_id: str, user_id: str) -> None:
         """命中后增加查询计数并更新 importance"""
-        if not user_id:
-            user_id = get_current_user()
         conn = _get_db_conn(self._db_path)
         conn.execute("""
             UPDATE memories SET
@@ -626,9 +604,8 @@ class MemoryStore:
         """, (config.IMPORTANCE_QUERY_BOOST, datetime.utcnow().isoformat(), memory_id, user_id))
         conn.commit()
 
-    def get_stats(self, platform_filter: str = None) -> Dict[str, Any]:
+    def get_stats(self, user_id: str, platform_filter: str = None) -> Dict[str, Any]:
         """统计信息"""
-        user_id = get_current_user()
         conn = _get_db_conn(self._db_path)
 
         if platform_filter:
