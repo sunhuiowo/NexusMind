@@ -22,6 +22,18 @@ from tools.llm import get_llm_client, get_embedder
 logger = logging.getLogger(__name__)
 
 
+# Per-user agent registry
+_user_agents: Dict[str, 'MemoryAgent'] = {}
+
+def get_memory_agent(user_id: str) -> 'MemoryAgent':
+    """Get or create a MemoryAgent for the specified user."""
+    if not user_id:
+        raise ValueError("get_memory_agent requires user_id")
+    if user_id not in _user_agents:
+        _user_agents[user_id] = MemoryAgent(user_id)
+    return _user_agents[user_id]
+
+
 class MemoryAgent:
     """
     Memory Agent
@@ -32,8 +44,11 @@ class MemoryAgent:
     通过 MCP 工具接口与其他 Agent 通信（原则 3）
     """
 
-    def __init__(self):
-        self._store = get_memory_store()
+    def __init__(self, user_id: str):
+        if not user_id:
+            raise ValueError("MemoryAgent requires user_id")
+        self._user_id = user_id
+        self._store = get_memory_store(user_id)
         self._llm = get_llm_client()
         self._embedder = get_embedder()
         self._updater = ImportanceUpdater(self._store, llm_func=self._llm)
