@@ -365,24 +365,32 @@ def delete_memory(memory_id: str) -> bool:
     return store.delete(memory_id)
 
 
-def get_stats(platform_filter: str = None) -> Dict[str, Any]:
+def get_stats(platform_filter: str = None, user_id: str = None) -> Dict[str, Any]:
     """
     统计信息
     MCP Tool: get_stats
+    注意: user_id 参数现在主要作为备用,主要从上下文获取
     """
-    store = get_memory_store()
+    store = get_memory_store(user_id)  # 会自动从上下文获取user_id
     return store.get_stats(platform_filter=platform_filter)
 
 
-def sync_platform(platform: str, full_sync: bool = False) -> Dict[str, Any]:
+def sync_platform(platform: str, full_sync: bool = False, user_id: str = None) -> Dict[str, Any]:
     """
     触发平台同步
     MCP Tool: sync_platform
     委托给 CollectorAgent 执行
+    user_id: 可选，默认从上下文获取
     """
     from agents.collector_agent import CollectorAgent
+    from auth.user_store import get_current_user
+
+    # 如果没有提供 user_id，从上下文获取
+    if user_id is None:
+        user_id = get_current_user()
+
     agent = CollectorAgent()
-    return agent.sync_single_platform(platform, full_sync=full_sync)
+    return agent.sync_single_platform(platform, full_sync=full_sync, user_id=user_id)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
