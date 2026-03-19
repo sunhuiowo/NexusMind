@@ -48,26 +48,41 @@ class SessionMiddleware(BaseHTTPMiddleware):
             session_id = request.cookies.get("session_id")
 
         if not session_id:
-            return JSONResponse(
-                status_code=401,
-                content={"error": "请先登录"}
-            )
+            return JSONResponse(status_code=401, content={"error": "请先登录"})
 
-        # Validate session
+        # Validate session and get user data
         user_store = get_user_store()
-        user_id = user_store.validate_session(session_id)
+        session_data = user_store.validate_session_with_data(session_id)
 
-        if not user_id:
-            return JSONResponse(
-                status_code=401,
-                content={"error": "会话已过期，请重新登录"}
-            )
+        if not session_data:
+            return JSONResponse(status_code=401, content={"error": "会话已过期，请重新登录"})
 
-        # Set user context for this request
+        user_id = session_data["user_id"]
+        is_admin = session_data.get("is_admin", False)
+
+        # Set base user context
         set_current_user(user_id)
+        request.state.user_id = user_id
+        request.state.is_admin = is_admin
+        request.state.is_impersonating = False
+        request.state.admin_user_id = None
+
+        # Check for impersonation token (admins only)
+        impersonation_token = request.headers.get("x-impersonation-token")
+        if impersonation_token and is_admin:
+            from auth.impersonation import validate_impersonation_token
+            token_data = validate_impersonation_token(impersonation_token)
+            if token_data and token_data["admin_user_id"] == user_id:
+                # Impersonation is valid - use target user as effective user_id
+                request.state.user_id = token_data["target_user_id"]
+                request.state.is_impersonating = True
+                request.state.admin_user_id = user_id
+                logger.info(f"[Middleware] Admin {user_id} impersonating {token_data['target_user_id']}")
+            else:
+                return JSONResponse(status_code=403, content={"error": "Invalid or expired impersonation token"})
+
         try:
             response = await call_next(request)
             return response
         finally:
-            # Clean up context
             set_current_user(None)

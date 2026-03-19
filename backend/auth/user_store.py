@@ -291,6 +291,27 @@ class UserStore:
 
         return row["user_id"]
 
+    def validate_session_with_data(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Validate session and return full session data including is_admin flag.
+        Returns: {user_id, is_admin} or None if invalid/expired
+        """
+        if not session_id:
+            return None
+
+        conn = _get_db_conn(self._db_path)
+        row = conn.execute("""
+            SELECT s.user_id, u.is_admin
+            FROM sessions s
+            JOIN users u ON s.user_id = u.id
+            WHERE s.id = ? AND s.expires_at > ?
+        """, (session_id, datetime.now(timezone.utc).isoformat())).fetchone()
+
+        if not row:
+            return None
+
+        return {"user_id": row[0], "is_admin": bool(row[1])}
+
     def logout_user(self, session_id: str) -> bool:
         """
         Logout user by deleting session
