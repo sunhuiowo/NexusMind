@@ -236,7 +236,6 @@ class OAuthHandler:
             print(f"[OAuth] {platform} 未收到 access_token")
             return False
 
-        from auth.token_store import get_token_store
         token_store = get_token_store(user_id)
         token_store.save(token_data)
         print(f"[OAuth] {platform} 授权成功，token 已加密存储")
