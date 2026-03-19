@@ -7,6 +7,23 @@ import type {
 
 const http = axios.create({ baseURL: '/api', timeout: 60000, headers: { 'Content-Type': 'application/json' } })
 
+// Add request interceptor to include session_id for authentication
+http.interceptors.request.use((config) => {
+  try {
+    const authStorage = localStorage.getItem('auth-storage')
+    if (authStorage) {
+      const parsed = JSON.parse(authStorage)
+      const sessionId = parsed?.state?.sessionId
+      if (sessionId) {
+        config.headers['X-Session-Id'] = sessionId
+      }
+    }
+  } catch (e) {
+    // Ignore parse errors
+  }
+  return config
+})
+
 // ── Query ──────────────────────────────────────────────────────────────────
 export interface ConversationHistoryItem {
   role: 'user' | 'assistant'
@@ -47,6 +64,18 @@ export const updateImportance = async (id: string, delta?: number, setValue?: nu
 // ── Sync ───────────────────────────────────────────────────────────────────
 export const syncPlatform = async (platform?: string, fullSync = false) =>
   (await http.post('/sync', { platform: platform ?? null, full_sync: fullSync })).data
+
+// ── File Upload ─────────────────────────────────────────────────────────────
+export const uploadFile = async (file: File): Promise<{ success: boolean; filename: string; size: number }> => {
+  const formData = new FormData()
+  formData.append('file', file)
+  const response = await http.post<{ success: boolean; filename: string; size: number }>(
+    '/upload',
+    formData,
+    { headers: { 'Content-Type': 'multipart/form-data' } }
+  )
+  return response.data
+}
 
 // ── Resync (重新同步：先删除后全量同步) ─────────────────────────────────────
 export const resyncPlatform = async (platform?: string) =>
