@@ -90,7 +90,7 @@ class TokenStore:
     存储目录：config.AUTH_DIR / {user_id} / {platform}_tokens.enc
     """
 
-    def __init__(self, master_password: str = None, encrypt_key: bytes = None, user_id: str = None):
+    def __init__(self, master_password: str = "", encrypt_key: bytes = None, user_id: str = ""):
         """
         初始化存储，优先使用 encrypt_key，否则从 master_password 派生
         user_id 用于用户隔离的目录
