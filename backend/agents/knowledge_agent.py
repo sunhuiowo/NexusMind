@@ -171,10 +171,11 @@ def _generate_overall_summary(hits: List[MemoryCard], query: str, llm_func=None)
 
 # ── 各意图执行策略 ─────────────────────────────────────────────────────────────
 
-def _execute_search(query: str, params: Dict, llm_func=None) -> QueryResult:
+def _execute_search(query: str, params: Dict, user_id: str, llm_func=None) -> QueryResult:
     """语义搜索"""
     result = search_memory(
         query=query,
+        user_id=user_id,
         top_k=config.TOP_K_RESULTS,
         platform_filter=params.get("platform"),
     )
@@ -190,12 +191,12 @@ def _execute_search(query: str, params: Dict, llm_func=None) -> QueryResult:
     return result
 
 
-def _execute_recent(query: str, params: Dict, llm_func=None) -> QueryResult:
+def _execute_recent(query: str, params: Dict, user_id: str, llm_func=None) -> QueryResult:
     """时间查询"""
     days = params.get("days", 7)
     platform = params.get("platform")
 
-    result = get_recent(days=days, platform=platform)
+    result = get_recent(user_id=user_id, days=days, platform=platform)
     result.query_intent = "recent"
     result.time_range = f"最近 {days} 天"
 
@@ -208,15 +209,15 @@ def _execute_recent(query: str, params: Dict, llm_func=None) -> QueryResult:
     return result
 
 
-def _execute_summary(query: str, params: Dict, llm_func=None) -> QueryResult:
+def _execute_summary(query: str, params: Dict, user_id: str, llm_func=None) -> QueryResult:
     """主题总结：检索 + 分组 + LLM 总结"""
     # 先语义检索，top_k 加大
-    result = search_memory(query=query, top_k=10)
+    result = search_memory(query=query, user_id=user_id, top_k=10)
     result.query_intent = "summary"
 
     memory_ids = [card.memory_id for card in result.hits if card.memory_id]
     if memory_ids and llm_func:
-        result.overall_summary = summarize_memories(memory_ids, llm_func=llm_func)
+        result.overall_summary = summarize_memories(user_id=user_id, memory_ids=memory_ids, llm_func=llm_func)
 
     # Fallback
     if not result.overall_summary and result.hits:
@@ -225,13 +226,13 @@ def _execute_summary(query: str, params: Dict, llm_func=None) -> QueryResult:
     return result
 
 
-def _execute_platform(query: str, params: Dict, llm_func=None) -> QueryResult:
+def _execute_platform(query: str, params: Dict, user_id: str, llm_func=None) -> QueryResult:
     """平台过滤查询"""
     platform = params.get("platform")
     if not platform:
-        return _execute_search(query, params, llm_func)
+        return _execute_search(query, params, user_id, llm_func)
 
-    result = get_by_platform(platform=platform, topic_query=query)
+    result = get_by_platform(platform=platform, user_id=user_id, topic_query=query)
     result.query_intent = "platform"
 
     if result.hits:
@@ -243,13 +244,13 @@ def _execute_platform(query: str, params: Dict, llm_func=None) -> QueryResult:
     return result
 
 
-def _execute_complex(query: str, params: Dict, llm_func=None) -> QueryResult:
+def _execute_complex(query: str, params: Dict, user_id: str, llm_func=None) -> QueryResult:
     """
     复合查询 - Plan-and-Execute 架构
     LLM 分解查询 → 多步执行 → 汇总结果
     """
     if not llm_func:
-        return _execute_search(query, params, llm_func)
+        return _execute_search(query, params, user_id, llm_func)
 
     # Step 1: LLM 分解查询为子任务
     decompose_prompt = f"""将以下复杂查询分解为 2-4 个简单子查询，每行一个，只返回子查询列表：
@@ -272,7 +273,7 @@ def _execute_complex(query: str, params: Dict, llm_func=None) -> QueryResult:
 
     for sub_q in sub_queries[:4]:  # 最多4个子查询
         try:
-            sub_result = search_memory(query=sub_q, top_k=5)
+            sub_result = search_memory(query=sub_q, user_id=user_id, top_k=5)
             for card in sub_result.hits:
                 if card.memory_id and card.memory_id not in all_hits:
                     all_hits[card.memory_id] = card
@@ -321,14 +322,16 @@ class KnowledgeAgent:
     原则 4：所有输出必须封装为 QueryResult，MemoryCard 五个必填字段不可缺
     """
 
-    def __init__(self):
+    def __init__(self, user_id: str = None):
         self._llm = get_llm_client()
+        self._user_id = user_id
 
-    def query(self, user_query: str, conversation_history: Optional[List[dict]] = None) -> QueryResult:
+    def query(self, user_query: str, user_id: str, conversation_history: Optional[List[dict]] = None) -> QueryResult:
         """
         主查询入口
         无论何种意图，都返回 QueryResult（原则 4）
         """
+        self._user_id = user_id
         if not user_query or not user_query.strip():
             return QueryResult(
                 hits=[],
@@ -365,7 +368,7 @@ class KnowledgeAgent:
         executor = executor_map.get(intent, _execute_search)
 
         try:
-            result = executor(enhanced_query, params, llm_func=self._llm)
+            result = executor(enhanced_query, params, user_id, llm_func=self._llm)
             # 生成思考过程
             if result.hits:
                 result.thinking = self._generate_thinking(user_query, result, conversation_history)
@@ -421,7 +424,7 @@ class KnowledgeAgent:
         # 确保 total_found 准确
         result.total_found = len(result.hits)
 
-    def format_response(self, result: QueryResult, voice: bool = False) -> str:
+    def format_response(self, result: QueryResult, user_id: str = None, voice: bool = False) -> str:
         """
         将 QueryResult 格式化为用户可见文本
         可选：语音播报
