@@ -8,10 +8,13 @@ import os
 import json
 import base64
 import hashlib
+import logging
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 from dataclasses import dataclass, asdict
+
+logger = logging.getLogger(__name__)
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
@@ -84,12 +87,13 @@ class TokenData:
 class TokenStore:
     """
     AES-256-GCM 加密凭证存储
-    存储目录：config.AUTH_DIR / {platform}_tokens.enc
+    存储目录：config.AUTH_DIR / {user_id} / {platform}_tokens.enc
     """
 
-    def __init__(self, master_password: str = None, encrypt_key: bytes = None):
+    def __init__(self, master_password: str = None, encrypt_key: bytes = None, user_id: str = None):
         """
         初始化存储，优先使用 encrypt_key，否则从 master_password 派生
+        user_id 用于用户隔离的目录
         """
         if encrypt_key:
             assert len(encrypt_key) == 32, "加密密钥必须为 32 字节（AES-256）"
@@ -107,7 +111,11 @@ class TokenStore:
             warnings.warn("未设置加密密钥，使用默认开发密钥，生产环境请设置 TOKEN_MASTER_PASSWORD")
             self._key = self._derive_key("dev-default-password-please-change")
 
-        self._auth_dir = Path(config.AUTH_DIR)
+        # 用户隔离的目录
+        if user_id and user_id != "_default":
+            self._auth_dir = Path(config.AUTH_DIR) / user_id
+        else:
+            self._auth_dir = Path(config.AUTH_DIR)
         self._auth_dir.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
@@ -222,13 +230,34 @@ class TokenStore:
             self.save(token)
 
 
-# ── 全局单例 ──────────────────────────────────────────────────────────────────
-_token_store_instance: Optional[TokenStore] = None
+# ── 用户隔离的 TokenStore ─────────────────────────────────────────────────────────
 
 
-def get_token_store() -> TokenStore:
-    """获取全局 TokenStore 单例"""
-    global _token_store_instance
-    if _token_store_instance is None:
-        _token_store_instance = TokenStore()
-    return _token_store_instance
+# 每个用户有独立的 TokenStore 实例
+_token_stores: Dict[str, TokenStore] = {}
+
+
+def get_token_store(user_id: str) -> TokenStore:
+    """
+    Get a TokenStore for the specified user.
+    user_id is REQUIRED - no default, no ContextVar fallback.
+    Raises ValueError if user_id is empty.
+    """
+    global _token_stores
+
+    if not user_id:
+        raise ValueError("get_token_store() requires explicit user_id")
+
+    if user_id not in _token_stores:
+        _token_stores[user_id] = TokenStore(user_id=user_id)
+        logger.info(f"Created new TokenStore for user: {user_id}")
+
+    return _token_stores[user_id]
+
+
+def clear_user_token_store(user_id: str) -> None:
+    """清除指定用户的 TokenStore 实例"""
+    global _token_stores
+    if user_id in _token_stores:
+        del _token_stores[user_id]
+        logger.info(f"Cleared TokenStore for user: {user_id}")
