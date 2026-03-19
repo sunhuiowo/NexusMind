@@ -474,6 +474,11 @@ def cli_main():
     srv.add_argument("--port", type=int, default=config.API_PORT)
 
     subs.add_parser("interactive")
+
+    admin_cmd = subs.add_parser("create-admin")
+    admin_cmd.add_argument("username")
+    admin_cmd.add_argument("password")
+
     args = parser.parse_args()
 
     if args.command == "query":
@@ -521,6 +526,15 @@ def cli_main():
             if not q or q.lower() in ("quit","exit","退出"):
                 break
             print("\n" + agent.format_response(agent.query(q)) + "\n")
+
+    elif args.command == "create-admin":
+        from auth.user_store import get_user_store
+        store = get_user_store()
+        user_id, error = store.create_admin_user(args.username, args.password)
+        if error:
+            print(f"Error: {error}")
+        else:
+            print(f"Admin user created: {user_id}")
     else:
         parser.print_help()
 

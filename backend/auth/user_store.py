@@ -60,6 +60,43 @@ class UserStore:
         # Ensure directory exists
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
+        self._ensure_default_admin()
+
+    def _ensure_default_admin(self):
+        """Create default admin user if no admin exists"""
+        conn = _get_db_conn(self._db_path)
+        admin_exists = conn.execute(
+            "SELECT id FROM users WHERE is_admin = 1"
+        ).fetchone()
+        if not admin_exists:
+            logger.info("[UserStore] Creating default admin user (admin/admin123)")
+            self.create_admin_user("admin", "admin123")
+
+    def create_admin_user(self, username: str, password: str) -> Tuple[Optional[str], Optional[str]]:
+        """Create an admin user"""
+        if len(username) < 2:
+            return None, "Username must be at least 2 characters"
+        if len(password) < 4:
+            return None, "Password must be at least 4 characters"
+
+        conn = _get_db_conn(self._db_path)
+        existing = conn.execute(
+            "SELECT id FROM users WHERE username = ?", (username,)
+        ).fetchone()
+        if existing:
+            return None, "Username already exists"
+
+        user_id = f"user_{uuid.uuid4().hex[:12]}"
+        password_hash = self._hash_password(password)
+        created_at = datetime.utcnow().isoformat()
+
+        conn.execute(
+            "INSERT INTO users (id, username, password_hash, is_admin, created_at) VALUES (?, ?, ?, ?, ?)",
+            (user_id, username, password_hash, 1, created_at)
+        )
+        conn.commit()
+        logger.info(f"[UserStore] Created admin user: {username} ({user_id})")
+        return user_id, None
 
     def _init_db(self):
         """Initialize database tables"""
