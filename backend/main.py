@@ -287,12 +287,13 @@ def create_app():
                 ["youtube","twitter","github","pocket","bilibili","wechat","douyin","xiaohongshu"]}
 
     @app.get("/auth/{platform}/connect")
-    async def oauth_connect(platform: str):
+    async def oauth_connect(platform: str, request: Request):
         OAUTH_PLATFORMS = {"youtube", "twitter", "pocket"}
         if platform not in OAUTH_PLATFORMS:
             raise HTTPException(status_code=400, detail=f"{platform} 不使用标准 OAuth")
+        user_id = request.state.user_id
         try:
-            auth_url, state = oauth_handler.get_auth_url(platform)
+            auth_url, state = oauth_handler.get_auth_url(platform, user_id)
             return {"auth_url": auth_url, "state": state}
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
@@ -334,10 +335,11 @@ def create_app():
         api_key: str
 
     @app.post("/auth/wechat/apikey")
-    async def wechat_key(body: WechatKeyBody):
+    async def wechat_key(body: WechatKeyBody, request: Request):
         from auth.token_store import get_token_store, TokenData
         from datetime import datetime
-        get_token_store().save(TokenData(platform="wechat", auth_mode="apikey",
+        user_id = request.state.user_id
+        get_token_store(user_id).save(TokenData(platform="wechat", auth_mode="apikey",
             api_key=body.api_key, status="connected",
             last_refresh=datetime.utcnow().isoformat()))
         return {"success": True}
@@ -346,10 +348,11 @@ def create_app():
         pat: str
 
     @app.post("/auth/github/pat")
-    async def github_pat(body: PATBody):
+    async def github_pat(body: PATBody, request: Request):
         from auth.token_store import get_token_store, TokenData
         from datetime import datetime
-        get_token_store().save(TokenData(platform="github", auth_mode="pat",
+        user_id = request.state.user_id
+        get_token_store(user_id).save(TokenData(platform="github", auth_mode="pat",
             access_token=body.pat, status="connected",
             last_refresh=datetime.utcnow().isoformat()))
         config.update_runtime({"GITHUB_PAT": body.pat})
@@ -360,10 +363,11 @@ def create_app():
         username: str = ""
 
     @app.post("/auth/pocket/token")
-    async def pocket_token(body: PocketTokenBody):
+    async def pocket_token(body: PocketTokenBody, request: Request):
         from auth.token_store import get_token_store, TokenData
         from datetime import datetime
-        get_token_store().save(TokenData(platform="pocket", auth_mode="oauth2",
+        user_id = request.state.user_id
+        get_token_store(user_id).save(TokenData(platform="pocket", auth_mode="oauth2",
             access_token=body.access_token, status="connected",
             last_refresh=datetime.utcnow().isoformat(),
             extra={"username": body.username}))
@@ -418,8 +422,7 @@ def create_app():
     # ── Health ─────────────────────────────────────────────────────────────
     @app.get("/health")
     async def health():
-        return {"status": "ok", "version": "1.2.0",
-                "total_memories": get_memory_store().get_stats().get("total", 0)}
+        return {"status": "ok", "version": "1.2.0"}
 
     return app
 
