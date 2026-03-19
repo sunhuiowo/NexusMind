@@ -322,7 +322,7 @@ class KnowledgeAgent:
     原则 4：所有输出必须封装为 QueryResult，MemoryCard 五个必填字段不可缺
     """
 
-    def __init__(self, user_id: str = None):
+    def __init__(self, user_id: str = ""):
         self._llm = get_llm_client()
         self._user_id = user_id
 
@@ -424,7 +424,7 @@ class KnowledgeAgent:
         # 确保 total_found 准确
         result.total_found = len(result.hits)
 
-    def format_response(self, result: QueryResult, user_id: str = None, voice: bool = False) -> str:
+    def format_response(self, result: QueryResult, user_id: str = "", voice: bool = False) -> str:
         """
         将 QueryResult 格式化为用户可见文本
         可选：语音播报
