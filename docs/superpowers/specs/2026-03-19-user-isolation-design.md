@@ -23,11 +23,13 @@ All tables **must** have `user_id TEXT NOT NULL`. Tables to modify:
 
 | Table | Change |
 |-------|--------|
-| `memories` | Add `user_id TEXT NOT NULL` field |
+| `memories` | Add `user_id TEXT NOT NULL` field — **including the Memory dataclass** |
 | `oauth_tokens` | Add explicit `user_id` column (storage path already per-user) |
 | `platform_accounts` | Add `user_id TEXT NOT NULL` |
 | `tasks` | Add `user_id TEXT NOT NULL` |
 | `logs` | Add `user_id TEXT NOT NULL` |
+
+**Important**: `Memory` dataclass (`memory_schema.py`) must also add `user_id: str` field. This is for query-level enforcement even within a per-user database file.
 
 ### 2.2 New Tables
 
@@ -130,8 +132,11 @@ Request (X-Session-Id header OR session cookie)
 
 ### 4.1 OAuthHandler (`backend/auth/oauth_handler.py`)
 
-**Current bug**: Global singleton, uses default TokenStore
-**Fix**: Accept `user_id` explicitly on each method call
+**Current bug**: Global singleton, uses default TokenStore. OAuth callback has no mechanism to identify user.
+**Fix**:
+1. `start_flow()` accepts `user_id` and encodes it in the state parameter: `state = json.dumps({platform, code_verifier, user_id})`
+2. `handle_callback()` decodes state to extract `user_id`, routes token to correct store
+3. Remove global `_oauth_handler` singleton
 
 ```python
 # Before (broken)
@@ -139,8 +144,12 @@ oauth_handler = get_oauth_handler()
 oauth_handler.start_flow(platform, redirect_uri)
 
 # After (fixed)
-oauth_handler = OAuthHandler()  # No global singleton
-oauth_handler.start_flow(platform, user_id, redirect_uri)
+oauth_handler = OAuthHandler()
+oauth_handler.start_flow(platform, user_id, redirect_uri)  # user_id encoded in state
+
+# handle_callback decodes user_id from state
+user_id = decoded_state["user_id"]
+token_store = get_token_store(user_id)
 ```
 
 ### 4.2 CollectorAgent (`backend/agents/collector_agent.py`)
@@ -182,7 +191,26 @@ def search_memory(query: str, user_id: str) -> QueryResult:
 
 **Fix**: All methods receive `user_id` explicitly, no implicit context lookup.
 
-### 4.6 All API Endpoints
+### 4.6 ContextVar Removal
+
+**CRITICAL**: Remove all ContextVar-based fallbacks for `user_id`.
+
+Current broken pattern:
+```python
+def get_memory_store(user_id=None):
+    if not user_id:
+        user_id = get_current_user()  # ContextVar fallback - REMOVE THIS
+```
+
+**Correct pattern**:
+```python
+def get_memory_store(user_id: str):  # user_id is REQUIRED, no default
+    ...
+```
+
+All `get_memory_store()` and `get_token_store()` functions must require explicit `user_id`. No ContextVar, no default parameter, no fallback.
+
+### 4.7 All API Endpoints
 
 Every endpoint that reads/writes data must use `request.state.user_id`. No exceptions.
 
@@ -230,6 +258,19 @@ Impersonation audit includes every action taken while impersonating.
 
 ---
 
+### 5.4 Background Tasks
+
+MemoryAgent background tasks (importance decay, relation updates) must run per-user, not as a global singleton.
+
+Options:
+1. Spawn a background thread **per user** on login
+2. Background tasks take `user_id` as parameter and look up that user's agent instance
+3. Run maintenance only during active user sessions (lazy)
+
+**Rejected**: Global background task with ContextVar (cannot work reliably across threads)
+
+---
+
 ## 6. File Structure Changes
 
 ```
@@ -237,13 +278,13 @@ backend/
 ├── auth/
 │   ├── user_store.py          # Add: delete_user_cascade, admin audit
 │   ├── session_middleware.py # Add: impersonation token handling
-│   └── impersonation.py      # NEW: impersonation token management
+│   └── impersonation.py       # NEW: impersonation token management
 ├── memory/
 │   ├── memory_store.py        # Enforce user_id on all operations
 │   ├── memory_schema.py       # Add user_id to Memory dataclass
 │   └── migrations/            # NEW: migration scripts
 ├── agents/
-│   ├── collector_agent.py    # Fix: pass user_id everywhere
+│   ├── collector_agent.py     # Fix: pass user_id everywhere
 │   ├── knowledge_agent.py     # Fix: pass user_id everywhere
 │   └── memory_agent.py        # Fix: per-user instances
 ├── tools/
@@ -252,12 +293,24 @@ backend/
 ├── routers/
 │   ├── admin.py               # NEW: admin endpoints
 │   └── ... (existing)
-└── main.py                    # Wire admin router
+└── main.py                   # Wire admin router
 ```
 
 ---
 
-## 7. Verification Checklist
+## 7. New Tables to Implement
+
+The following tables must be created in `backend/data/users.db`:
+
+- `impersonation_tokens` — as defined in Section 2.2
+- `admin_audit_logs` — as defined in Section 2.2
+- `platform_accounts` with `user_id TEXT NOT NULL`
+- `tasks` with `user_id TEXT NOT NULL`
+- `logs` with `user_id TEXT NOT NULL`
+
+---
+
+## 8. Verification Checklist
 
 Before claiming completion, verify:
 
