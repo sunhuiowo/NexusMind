@@ -26,6 +26,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from auth.session_middleware import SessionMiddleware, PUBLIC_PATHS
 from auth.user_store import get_user_store, set_current_user, get_current_user
+from routers.admin import router as admin_router
 
 
 def create_app():
@@ -49,6 +50,7 @@ def create_app():
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
     # 添加用户隔离中间件
     app.add_middleware(SessionMiddleware, public_paths=PUBLIC_PATHS)
+    app.include_router(admin_router)
 
     knowledge_agent = KnowledgeAgent()
     collector_agent = CollectorAgent()
