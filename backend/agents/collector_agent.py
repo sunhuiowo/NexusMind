@@ -52,7 +52,7 @@ def _get_connector(platform: str) -> Optional[BasePlatformConnector]:
         return None
 
 
-def _parse_content(content: RawContent, llm_func=None) -> RawContent:
+def _parse_content(content: RawContent, llm_func=None, user_id: str = None) -> RawContent:
     """
     按 media_type 路由到对应解析器，丰富 body 字段
     解析路由层 + 统一文本出口
@@ -80,7 +80,7 @@ def _parse_content(content: RawContent, llm_func=None) -> RawContent:
                     from auth.token_store import get_token_store
 
                     # 获取B站登录凭证
-                    token_store = get_token_store()
+                    token_store = get_token_store(user_id)
                     token_data = token_store.load("bilibili")
 
                     sessdata = None
@@ -188,10 +188,12 @@ class CollectorAgent:
         self,
         platform: str,
         full_sync: bool = False,
+        user_id: str,
     ) -> Dict[str, Any]:
         """
         同步单个平台
         返回同步结果统计
+        user_id: 用于数据隔离，如果为None则从上下文获取
         """
         logger.info(f"[Collector] 开始同步平台: {platform} (full_sync={full_sync})")
 
@@ -232,7 +234,7 @@ class CollectorAgent:
         from concurrent.futures import ThreadPoolExecutor, as_completed
         from memory.memory_store import get_memory_store
 
-        store = get_memory_store()
+        store = get_memory_store(user_id)
 
         # 预先过滤已存在的记忆（避免浪费 LLM 调用）
         new_contents = []
@@ -250,10 +252,10 @@ class CollectorAgent:
             result["success"] = True
             return result
 
-        def parse_and_enqueue(content):
+        def parse_and_enqueue(content, llm_func, user_id):
             """解析单个内容，返回用于批量入库的 RawContent"""
             try:
-                return _parse_content(content, llm_func=self._llm)
+                return _parse_content(content, llm_func=llm_func, user_id=user_id)
             except Exception as e:
                 logger.warning(f"[Collector] 解析失败 {content.platform_id}: {e}")
                 return None
@@ -262,7 +264,7 @@ class CollectorAgent:
         logger.info(f"[Collector] 开始并行解析 {len(new_contents)} 条内容...")
         parsed_contents = []
         with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = {executor.submit(parse_and_enqueue, c): c for c in new_contents}
+            futures = {executor.submit(parse_and_enqueue, c, self._llm, user_id): c for c in new_contents}
             for future in as_completed(futures):
                 parsed = future.result()
                 if parsed:
@@ -307,15 +309,16 @@ class CollectorAgent:
         )
         return result
 
-    def sync_all_platforms(self, full_sync: bool = False) -> List[Dict[str, Any]]:
+    def sync_all_platforms(self, full_sync: bool = False, user_id: str) -> List[Dict[str, Any]]:
         """
         同步所有启用的平台
         单平台失败不阻断其他平台（原则 7 推广）
+        user_id: 用于数据隔离，如果为None则从上下文获取
         """
         results = []
         for platform in config.PLATFORMS_ENABLED:
             try:
-                result = self.sync_single_platform(platform, full_sync=full_sync)
+                result = self.sync_single_platform(platform, full_sync=full_sync, user_id=user_id)
                 results.append(result)
             except Exception as e:
                 logger.error(f"[Collector] {platform} 同步崩溃（已隔离）: {e}")
@@ -330,10 +333,11 @@ class CollectorAgent:
         logger.info(f"[Collector] 全平台同步完成，总计新增 {total_added} 条记忆")
         return results
 
-    def resync_platform(self, platform: str) -> Dict[str, Any]:
+    def resync_platform(self, platform: str, user_id: str) -> Dict[str, Any]:
         """
         重新同步指定平台
         步骤：1. 删除该平台所有已有数据 2. 执行全量同步
+        user_id: 用于数据隔离
         """
         from memory.memory_store import get_memory_store, _get_db_conn
 
@@ -349,7 +353,7 @@ class CollectorAgent:
             "error_msg": "",
         }
 
-        store = get_memory_store()
+        store = get_memory_store(user_id)
 
         # 步骤 1: 删除该平台的现有数据
         try:
@@ -406,7 +410,7 @@ class CollectorAgent:
         if platform in _last_sync_at:
             del _last_sync_at[platform]
 
-        sync_result = self.sync_single_platform(platform, full_sync=True)
+        sync_result = self.sync_single_platform(platform, full_sync=True, user_id=user_id)
 
         # 合并结果
         result["success"] = sync_result.get("success", False)
@@ -422,16 +426,17 @@ class CollectorAgent:
         )
         return result
 
-    def resync_all_platforms(self) -> List[Dict[str, Any]]:
+    def resync_all_platforms(self, user_id: str) -> List[Dict[str, Any]]:
         """
         重新同步所有启用的平台
         步骤：1. 删除所有数据 2. 执行全量同步
+        user_id: 用于数据隔离
         """
         from memory.memory_store import get_memory_store
 
         logger.info("[Collector] 开始重新同步所有平台")
 
-        store = get_memory_store()
+        store = get_memory_store(user_id)
 
         # 步骤 1: 删除所有数据
         try:
@@ -457,4 +462,4 @@ class CollectorAgent:
         _last_sync_at.clear()
 
         # 步骤 3: 执行全量同步
-        return self.sync_all_platforms(full_sync=True)
+        return self.sync_all_platforms(full_sync=True, user_id=user_id)
