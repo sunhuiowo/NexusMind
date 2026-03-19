@@ -100,40 +100,6 @@ def create_app():
             raise HTTPException(status_code=404, detail="用户不存在")
         return user
 
-    # ── Admin ───────────────────────────────────────────────────────────────
-
-    @app.get("/admin/users")
-    async def list_users(request: Request):
-        session_id = request.headers.get("x-session-id")
-        if not session_id:
-            raise HTTPException(status_code=401, detail="请先登录")
-        store = get_user_store()
-        user_id = store.validate_session(session_id)
-        if not user_id:
-            raise HTTPException(status_code=401, detail="会话已过期，请重新登录")
-        user = store.get_user(user_id)
-        if not user or not user.get("is_admin"):
-            raise HTTPException(status_code=403, detail="需要管理员权限")
-        users = store.list_users()
-        return {"users": users}
-
-    @app.delete("/admin/users/{user_id}")
-    async def delete_user(user_id: str, request: Request):
-        session_id = request.headers.get("x-session-id")
-        if not session_id:
-            raise HTTPException(status_code=401, detail="请先登录")
-        store = get_user_store()
-        current_user_id = store.validate_session(session_id)
-        if not current_user_id:
-            raise HTTPException(status_code=401, detail="会话已过期，请重新登录")
-        current_user = store.get_user(current_user_id)
-        if not current_user or not current_user.get("is_admin"):
-            raise HTTPException(status_code=403, detail="需要管理员权限")
-        success, error = store.delete_user(user_id)
-        if not success:
-            raise HTTPException(status_code=400, detail=error)
-        return {"success": True}
-
     # ── Query ──────────────────────────────────────────────────────────────
     class QueryRequest(BaseModel):
         query: str
