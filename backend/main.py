@@ -25,7 +25,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 
 from auth.session_middleware import SessionMiddleware, PUBLIC_PATHS
-from auth.user_store import get_user_store, set_current_user
+from auth.user_store import get_user_store, set_current_user, get_current_user
 
 
 def create_app():
@@ -169,7 +169,7 @@ def create_app():
         from memory.memory_schema import Memory, MemoryCard
         from datetime import datetime, timedelta
 
-        user_id = get_user_id_from_request(request)
+        user_id = get_current_user()
         store = get_memory_store(user_id)
 
         if query and query.strip():
@@ -234,12 +234,12 @@ def create_app():
 
     @app.get("/memories/stats")
     async def stats_endpoint(request: Request, platform: Optional[str] = None):
-        user_id = get_user_id_from_request(request)
+        user_id = get_current_user()
         return get_stats(platform_filter=platform, user_id=user_id)
 
     @app.get("/memories/{memory_id}")
     async def get_memory(request: Request, memory_id: str):
-        user_id = get_user_id_from_request(request)
+        user_id = get_current_user()
         store = get_memory_store(user_id)
         m = store.get(memory_id)
         if not m:
@@ -283,7 +283,7 @@ def create_app():
 
     @app.post("/sync")
     async def sync_endpoint(req: SyncRequest, background_tasks: BackgroundTasks, request: Request):
-        user_id = get_user_id_from_request(request)
+        user_id = get_current_user()
         if req.platform:
             background_tasks.add_task(collector_agent.sync_single_platform, req.platform, req.full_sync, user_id)
             return {"message": f"已启动 {req.platform} 同步"}
@@ -300,7 +300,7 @@ def create_app():
         - 指定 platform: 仅重新同步该平台
         - 不指定 platform: 重新同步所有平台
         """
-        user_id = get_user_id_from_request(request)
+        user_id = get_current_user()
         if req.platform:
             background_tasks.add_task(collector_agent.resync_platform, req.platform, user_id)
             return {"message": f"已启动 {req.platform} 重新同步（先删除后全量同步）"}
