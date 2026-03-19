@@ -10,12 +10,17 @@ logger = logging.getLogger(__name__)
 
 # Public paths that don't require authentication
 PUBLIC_PATHS = {
-    "/auth/register",
-    "/auth/login",
+    "/auth/register",   # Public - anyone can register
+    "/auth/login",      # Public - anyone can login
     "/health",
     "/docs",
     "/openapi.json",
     "/api/health",
+    # OAuth callbacks - MUST be public (external redirects from OAuth providers)
+    "/auth/callback/youtube",
+    "/auth/callback/twitter",
+    "/auth/callback/pocket",
+    "/auth/callback/github",
 }
 
 
@@ -33,7 +38,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
         path = request.url.path
 
         # Allow public paths without session check
-        if path in self.public_paths or path.startswith("/auth/"):
+        if path in self.public_paths:
             response = await call_next(request)
             return response
 
