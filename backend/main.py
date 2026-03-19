@@ -43,7 +43,7 @@ def create_app():
         find_related, get_by_tags)
     from tools.llm import get_llm, get_embedder
     from memory.memory_store import get_memory_store
-    from auth.oauth_handler import get_oauth_handler
+    from auth.oauth_handler import OAuthHandler
     from auth.qrcode_auth import get_qrcode, poll_qrcode
 
     app = FastAPI(title="Personal AI Memory System", version="1.2.0")
@@ -54,7 +54,6 @@ def create_app():
 
     knowledge_agent = KnowledgeAgent()
     collector_agent = CollectorAgent()
-    oauth_handler = get_oauth_handler()
 
     # ── Auth (Session-based) ─────────────────────────────────────────────────
 
@@ -293,7 +292,7 @@ def create_app():
             raise HTTPException(status_code=400, detail=f"{platform} 不使用标准 OAuth")
         user_id = request.state.user_id
         try:
-            auth_url, state = oauth_handler.get_auth_url(platform, user_id)
+            auth_url, state = OAuthHandler().get_auth_url(platform, user_id)
             return {"auth_url": auth_url, "state": state}
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
@@ -313,13 +312,13 @@ def create_app():
 
     @app.get("/auth/callback/{platform}")
     async def oauth_callback(platform: str, code: str, state: str):
-        if oauth_handler.handle_callback(platform, code, state):
+        if OAuthHandler().handle_callback(platform, code, state):
             return {"success": True}
         raise HTTPException(status_code=400, detail="授权失败")
 
     @app.delete("/auth/{platform}")
     async def revoke(platform: str):
-        oauth_handler.revoke(platform)
+        OAuthHandler().revoke(platform)
         return {"success": True}
 
     class CookieBody(BaseModel):
