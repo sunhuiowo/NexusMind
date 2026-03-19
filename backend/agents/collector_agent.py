@@ -52,7 +52,7 @@ def _get_connector(platform: str) -> Optional[BasePlatformConnector]:
         return None
 
 
-def _parse_content(content: RawContent, llm_func=None, user_id: str = None) -> RawContent:
+def _parse_content(content: RawContent, llm_func=None, user_id: str = "") -> RawContent:
     """
     按 media_type 路由到对应解析器，丰富 body 字段
     解析路由层 + 统一文本出口
@@ -187,8 +187,8 @@ class CollectorAgent:
     def sync_single_platform(
         self,
         platform: str,
-        full_sync: bool = False,
         user_id: str,
+        full_sync: bool = False,
     ) -> Dict[str, Any]:
         """
         同步单个平台
@@ -309,7 +309,7 @@ class CollectorAgent:
         )
         return result
 
-    def sync_all_platforms(self, full_sync: bool = False, user_id: str) -> List[Dict[str, Any]]:
+    def sync_all_platforms(self, user_id: str, full_sync: bool = False) -> List[Dict[str, Any]]:
         """
         同步所有启用的平台
         单平台失败不阻断其他平台（原则 7 推广）
@@ -318,7 +318,7 @@ class CollectorAgent:
         results = []
         for platform in config.PLATFORMS_ENABLED:
             try:
-                result = self.sync_single_platform(platform, full_sync=full_sync, user_id=user_id)
+                result = self.sync_single_platform(platform, user_id, full_sync=full_sync)
                 results.append(result)
             except Exception as e:
                 logger.error(f"[Collector] {platform} 同步崩溃（已隔离）: {e}")
@@ -410,7 +410,7 @@ class CollectorAgent:
         if platform in _last_sync_at:
             del _last_sync_at[platform]
 
-        sync_result = self.sync_single_platform(platform, full_sync=True, user_id=user_id)
+        sync_result = self.sync_single_platform(platform, user_id, full_sync=True)
 
         # 合并结果
         result["success"] = sync_result.get("success", False)
@@ -462,4 +462,4 @@ class CollectorAgent:
         _last_sync_at.clear()
 
         # 步骤 3: 执行全量同步
-        return self.sync_all_platforms(full_sync=True, user_id=user_id)
+        return self.sync_all_platforms(user_id, full_sync=True)
