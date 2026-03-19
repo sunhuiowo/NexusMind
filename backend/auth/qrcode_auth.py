@@ -62,7 +62,7 @@ def bilibili_get_qrcode() -> Dict[str, Any]:
         return {"error": str(e)}
 
 
-def bilibili_poll_qrcode(qrcode_key: str) -> Dict[str, Any]:
+def bilibili_poll_qrcode(qrcode_key: str, user_id: str) -> Dict[str, Any]:
     """
     轮询 B站 扫码状态
     返回:
@@ -104,7 +104,7 @@ def bilibili_poll_qrcode(qrcode_key: str) -> Dict[str, Any]:
                 return {"status": "error", "error": "未获取到 SESSDATA"}
 
             # 保存三个独立的 cookie 字段
-            _save_bilibili_cookies(sessdata, bili_jct, dedeuserid)
+            _save_bilibili_cookies(sessdata, bili_jct, dedeuserid, user_id)
             return {"status": "confirmed"}
 
         elif code == 86101:
@@ -169,7 +169,7 @@ def douyin_get_qrcode() -> Dict[str, Any]:
         return {"error": str(e)}
 
 
-def douyin_poll_qrcode(qrcode_key: str) -> Dict[str, Any]:
+def douyin_poll_qrcode(qrcode_key: str, user_id: str) -> Dict[str, Any]:
     """轮询抖音扫码状态"""
     try:
         resp = requests.get(
@@ -189,7 +189,7 @@ def douyin_poll_qrcode(qrcode_key: str) -> Dict[str, Any]:
             # 登录成功
             cookies = resp.cookies.get_dict()
             cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
-            _save_cookie_token("douyin", cookie_str, resp.cookies)
+            _save_cookie_token("douyin", cookie_str, user_id, cookies=resp.cookies)
             return {"status": "confirmed"}
         elif err_code == 10011:
             return {"status": "waiting"}   # 待扫描
@@ -209,10 +209,10 @@ def douyin_poll_qrcode(qrcode_key: str) -> Dict[str, Any]:
 # 通用工具
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def _save_cookie_token(platform: str, cookie_str: str, cookies=None) -> None:
+def _save_cookie_token(platform: str, cookie_str: str, user_id: str, cookies=None) -> None:
     """将扫码获得的 Cookie 保存到 TokenStore"""
     from datetime import datetime, timedelta
-    store = get_token_store()
+    store = get_token_store(user_id)
     store.save(TokenData(
         platform=platform,
         auth_mode="cookie",
@@ -225,10 +225,10 @@ def _save_cookie_token(platform: str, cookie_str: str, cookies=None) -> None:
     logger.info(f"[QRCode] {platform} 扫码登录成功，Cookie 已保存")
 
 
-def _save_bilibili_cookies(sessdata: str, bili_jct: str, dedeuserid: str) -> None:
+def _save_bilibili_cookies(sessdata: str, bili_jct: str, dedeuserid: str, user_id: str) -> None:
     """保存 B站三个关键 Cookie（SESSDATA, bili_jct, DedeUserID）"""
     from datetime import datetime, timedelta
-    store = get_token_store()
+    store = get_token_store(user_id)
     store.save(TokenData(
         platform="bilibili",
         auth_mode="cookie",
@@ -254,10 +254,10 @@ def get_qrcode(platform: str) -> Dict[str, Any]:
         return {"error": f"平台 {platform} 不支持扫码登录"}
 
 
-def poll_qrcode(platform: str, qrcode_key: str) -> Dict[str, Any]:
+def poll_qrcode(platform: str, qrcode_key: str, user_id: str) -> Dict[str, Any]:
     if platform == "bilibili":
-        return bilibili_poll_qrcode(qrcode_key)
+        return bilibili_poll_qrcode(qrcode_key, user_id)
     elif platform == "douyin":
-        return douyin_poll_qrcode(qrcode_key)
+        return douyin_poll_qrcode(qrcode_key, user_id)
     else:
         return {"status": "error", "error": f"平台 {platform} 不支持扫码登录"}
