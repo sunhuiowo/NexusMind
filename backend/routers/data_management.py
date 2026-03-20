@@ -251,15 +251,11 @@ async def import_memories(request: Request, file: UploadFile = File(...)):
 @router.delete("/old")
 async def delete_old_memories(
     request: Request,
-    days: int = Query(default=30, ge=1, description="Delete memories not accessed in last N days"),
-    confirm: bool = Query(default=False, description="Must be true to execute deletion"),
+    days: int = Query(default=180, ge=1, description="Delete memories not accessed in last N days"),
 ):
     """
     Delete memories older than specified days OR with NULL/empty last_accessed_at.
-    Requires confirm=true to execute.
     """
-    if not confirm:
-        raise HTTPException(status_code=400, detail="Must set confirm=true to execute deletion")
 
     user_id = get_user_id(request)
     store = get_memory_store(user_id)
