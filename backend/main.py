@@ -27,6 +27,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from auth.session_middleware import SessionMiddleware, PUBLIC_PATHS
 from auth.user_store import get_user_store
 from routers.admin import router as admin_router
+from routers.data_management import router as data_management_router, config_router as data_config_router
 
 
 def create_app():
@@ -51,6 +52,8 @@ def create_app():
     # 添加用户隔离中间件
     app.add_middleware(SessionMiddleware, public_paths=PUBLIC_PATHS)
     app.include_router(admin_router)
+    app.include_router(data_management_router)
+    app.include_router(data_config_router)
 
     knowledge_agent = KnowledgeAgent()
     collector_agent = CollectorAgent()
@@ -106,15 +109,17 @@ def create_app():
         conversation_history: Optional[List[dict]] = None
 
     @app.post("/query")
-    async def query_post(req: QueryRequest):
-        result = knowledge_agent.query(req.query, conversation_history=req.conversation_history)
+    async def query_post(req: QueryRequest, request: Request):
+        user_id = request.state.user_id
+        result = knowledge_agent.query(req.query, user_id=user_id, conversation_history=req.conversation_history)
         if req.voice:
             knowledge_agent.format_response(result, voice=True)
         return result.to_dict()
 
     @app.get("/query")
-    async def query_get(q: str, voice: bool = False):
-        result = knowledge_agent.query(q)
+    async def query_get(request: Request, q: str, voice: bool = False):
+        user_id = request.state.user_id
+        result = knowledge_agent.query(q, user_id=user_id)
         if voice:
             knowledge_agent.format_response(result, voice=True)
         return result.to_dict()
@@ -247,14 +252,16 @@ def create_app():
     class SyncRequest(BaseModel):
         platform: Optional[str] = None
         full_sync: bool = False
+        folder_ids: Optional[List[int]] = None  # 仅 Bilibili 等支持
+        item_ids: Optional[List[str]] = None  # 指定具体内容 ID 列表
 
     @app.post("/sync")
     async def sync_endpoint(req: SyncRequest, background_tasks: BackgroundTasks, request: Request):
         user_id = request.state.user_id
         if req.platform:
-            background_tasks.add_task(collector_agent.sync_single_platform, req.platform, req.full_sync, user_id)
+            background_tasks.add_task(collector_agent.sync_single_platform, req.platform, user_id, req.full_sync, req.folder_ids, req.item_ids)
             return {"message": f"已启动 {req.platform} 同步"}
-        background_tasks.add_task(collector_agent.sync_all_platforms, req.full_sync, user_id)
+        background_tasks.add_task(collector_agent.sync_all_platforms, user_id, req.full_sync)
         return {"message": "已启动全平台同步"}
 
     class ResyncRequest(BaseModel):
@@ -310,9 +317,134 @@ def create_app():
     async def qrcode_poll_endpoint(platform: str, qrcode_key: str, request: Request):
         return poll_qrcode(platform, qrcode_key, request.state.user_id)
 
+    @app.get("/collections/{platform}")
+    async def get_platform_collections(platform: str, request: Request, refresh: bool = False):
+        """
+        获取平台收藏集合列表（收藏夹/播放列表/Star列表等）
+        refresh=true 时强制从API重新获取，否则优先返回缓存
+        """
+        user_id = request.state.user_id
+        if not user_id:
+            raise HTTPException(status_code=401, detail="请先登录")
+
+        connector_map = {
+            "bilibili": ("platforms.bilibili_connector", "BilibiliConnector"),
+            "youtube": ("platforms.youtube_connector", "YouTubeConnector"),
+            "twitter": ("platforms.twitter_connector", "TwitterConnector"),
+            "github": ("platforms.github_connector", "GitHubConnector"),
+            "pocket": ("platforms.pocket_connector", "PocketConnector"),
+            "douyin": ("platforms.douyin_connector", "DouyinConnector"),
+            "wechat": ("platforms.wechat_connector", "WeChatConnector"),
+            "xiaohongshu": ("platforms.xiaohongshu_connector", "XiaohongshuConnector"),
+        }
+
+        if platform not in connector_map:
+            raise HTTPException(status_code=400, detail=f"{platform} 不支持获取收藏列表")
+
+        try:
+            module_path, class_name = connector_map[platform]
+            import importlib
+            module = importlib.import_module(module_path)
+            connector = getattr(module, class_name)(user_id=user_id)
+
+            # 优先返回缓存的收藏
+            cached = None
+            if hasattr(connector, 'get_cached_collections'):
+                cached = connector.get_cached_collections()
+            if cached and not refresh:
+                return {
+                    "platform": platform,
+                    "collections": cached,
+                    "from_cache": True,
+                }
+
+            # 预获取收藏列表（如果 connector 支持）
+            collections = []
+            if hasattr(connector, 'prefetch_collections'):
+                collections = connector.prefetch_collections()
+            elif hasattr(connector, 'get_collections'):
+                collections = connector.get_collections()
+
+            return {
+                "platform": platform,
+                "collections": collections,
+                "from_cache": False,
+            }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"获取收藏列表失败: {str(e)}")
+
+    @app.get("/collections/{platform}/{collection_id}/items")
+    async def get_collection_items(platform: str, collection_id: str, request: Request, limit: int = 100):
+        """获取指定收藏夹内的内容（用于前端展开预览）"""
+        user_id = request.state.user_id
+        if not user_id:
+            raise HTTPException(status_code=401, detail="请先登录")
+
+        connector_map = {
+            "bilibili": ("platforms.bilibili_connector", "BilibiliConnector"),
+            "github": ("platforms.github_connector", "GitHubConnector"),
+        }
+
+        if platform not in connector_map:
+            raise HTTPException(status_code=400, detail=f"{platform} 不支持获取收藏夹内容")
+
+        try:
+            module_path, class_name = connector_map[platform]
+            import importlib
+            module = importlib.import_module(module_path)
+            connector = getattr(module, class_name)(user_id=user_id)
+
+            if not hasattr(connector, 'get_collection_items'):
+                raise HTTPException(status_code=400, detail=f"{platform} 不支持获取收藏夹内容")
+
+            items = connector.get_collection_items(collection_id, limit)
+            # 返回简化信息（通用格式）
+            return {
+                "platform": platform,
+                "collection_id": collection_id,
+                "items": [
+                    {
+                        "id": str(item.get("id", "")),
+                        "title": item.get("title", ""),
+                        "url": item.get("url", "") or item.get("bvid", ""),
+                        "author": item.get("author", "") or (item.get("upper", {}).get("name", "") if item.get("upper") else ""),
+                        "thumbnail": item.get("thumbnail", "") or item.get("cover", ""),
+                    }
+                    for item in items[:limit]
+                ]
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"获取收藏夹内容失败: {str(e)}")
+
     @app.get("/auth/callback/{platform}")
-    async def oauth_callback(platform: str, code: str, state: str):
+    async def oauth_callback(platform: str, code: str, state: str, request: Request):
         if OAuthHandler().handle_callback(platform, code, state):
+            # 授权成功后，后台预获取收藏列表并缓存
+            user_id = request.state.user_id
+            try:
+                import threading
+                def prefetch_background():
+                    try:
+                        connector_map = {
+                            "youtube": ("platforms.youtube_connector", "YouTubeConnector"),
+                            "twitter": ("platforms.twitter_connector", "TwitterConnector"),
+                            "github": ("platforms.github_connector", "GitHubConnector"),
+                        }
+                        if platform in connector_map:
+                            module_path, class_name = connector_map[platform]
+                            import importlib
+                            module = importlib.import_module(module_path)
+                            connector = getattr(module, class_name)(user_id=user_id)
+                            if hasattr(connector, 'prefetch_collections'):
+                                collections = connector.prefetch_collections()
+                                logger.info(f"[{platform}] 授权成功，已缓存收藏")
+                    except Exception as e:
+                        logger.warning(f"[{platform}] 后台预获取收藏失败: {e}")
+                threading.Thread(target=prefetch_background, daemon=True).start()
+            except Exception:
+                pass
             return {"success": True}
         raise HTTPException(status_code=400, detail="授权失败")
 
