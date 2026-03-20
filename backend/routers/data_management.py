@@ -293,14 +293,14 @@ async def delete_old_memories(
 @router.delete("/all")
 async def clear_all_memories(
     request: Request,
-    confirm: bool = Query(description="Must be true to execute deletion"),
+    confirm: Optional[str] = Query(None, description="Must be 'true' to execute deletion"),
 ):
     """
     Delete ALL memories for the current user and reset FAISS index.
-    Requires confirm=true to execute.
+    Requires confirm='true' to execute.
     """
-    if not confirm:
-        raise HTTPException(status_code=400, detail="Must set confirm=true to execute deletion")
+    if not confirm or confirm.lower() != "true":
+        raise HTTPException(status_code=400, detail="Must set confirm='true' to execute deletion")
 
     user_id = get_user_id(request)
     store = get_memory_store(user_id)
@@ -316,10 +316,11 @@ async def clear_all_memories(
     conn.execute("DELETE FROM memories WHERE user_id=?", (user_id,))
     conn.commit()
 
-    # Reset FAISS index for this user
-    store._index.reset()
-    store._id_to_pos.clear()
-    store._pos_to_id.clear()
+    # Reset FAISS index for this user (guard against FAISS not installed)
+    if store._index is not None:
+        store._index.reset()
+        store._id_to_pos.clear()
+        store._pos_to_id.clear()
     store._save_index()
 
     return ClearAllResult(success=True, deleted_count=deleted_count)
