@@ -12,6 +12,9 @@ from memory.memory_store import get_memory_store, _get_db_conn
 from memory.memory_schema import Memory
 from tools.llm import get_embedder
 
+DEFAULT_CLEANUP_DAYS = 180
+MAX_IMPORT_ERRORS = 20
+
 router = APIRouter(prefix="/memories", tags=["data_management"])
 config_router = APIRouter(prefix="/config", tags=["config_management"])
 
@@ -173,7 +176,8 @@ async def import_memories(request: Request, file: UploadFile = File(...)):
                         author=?,
                         thumbnail_url=?,
                         last_accessed_at=?,
-                        related_ids=?
+                        related_ids=?,
+                        platform_name=?
                     WHERE id=? AND user_id=?
                 """, (
                     mem_data.get("title", ""),
@@ -188,6 +192,7 @@ async def import_memories(request: Request, file: UploadFile = File(...)):
                     mem_data.get("thumbnail_url", ""),
                     mem_data.get("last_accessed_at", ""),
                     json.dumps(mem_data.get("related_ids", []), ensure_ascii=False),
+                    mem_data.get("platform_name", ""),
                     memory_id,
                     user_id,
                 ))
@@ -242,7 +247,7 @@ async def import_memories(request: Request, file: UploadFile = File(...)):
         imported=imported,
         updated=updated,
         failed=failed,
-        errors=errors[:20],  # Limit errors to first 20
+        errors=errors[:MAX_IMPORT_ERRORS],  # Limit errors to first MAX_IMPORT_ERRORS
     )
 
 
@@ -251,7 +256,7 @@ async def import_memories(request: Request, file: UploadFile = File(...)):
 @router.delete("/old")
 async def delete_old_memories(
     request: Request,
-    days: int = Query(default=180, ge=1, description="Delete memories not accessed in last N days"),
+    days: int = Query(default=DEFAULT_CLEANUP_DAYS, ge=1, description="Delete memories not accessed in last N days"),
 ):
     """
     Delete memories older than specified days OR with NULL/empty last_accessed_at.
@@ -365,7 +370,7 @@ def _rebuild_faiss_index(store, conn, user_id: str):
                 store._pos_to_id.pop(pos, None)
 
         # If too many orphaned entries, rebuild index entirely
-        if len(orphaned_ids) > len(remaining_ids) * 0.5:
+        if remaining_ids and len(orphaned_ids) > len(remaining_ids) * 0.5:
             # Get all memories and rebuild embeddings
             embedder = get_embedder()
             rows = conn.execute(
