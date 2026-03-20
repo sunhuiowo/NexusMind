@@ -62,8 +62,8 @@ export const updateImportance = async (id: string, delta?: number, setValue?: nu
   http.patch(`/memories/${id}/importance`, { delta, set_value: setValue })
 
 // ── Sync ───────────────────────────────────────────────────────────────────
-export const syncPlatform = async (platform?: string, fullSync = false) =>
-  (await http.post('/sync', { platform: platform ?? null, full_sync: fullSync })).data
+export const syncPlatform = async (platform?: string, fullSync = false, folderIds?: number[], itemIds?: string[]) =>
+  (await http.post('/sync', { platform: platform ?? null, full_sync: fullSync, folder_ids: folderIds ?? null, item_ids: itemIds ?? null })).data
 
 // ── File Upload ─────────────────────────────────────────────────────────────
 export const uploadFile = async (file: File): Promise<{ success: boolean; filename: string; size: number }> => {
@@ -107,6 +107,39 @@ export const setWechatKey = async (api_key: string): Promise<void> =>
 export const setGithubPAT = async (pat: string): Promise<void> =>
   { await http.post('/auth/github/pat', { pat }) }
 
+// ── Platform Collections ────────────────────────────────────────────────────
+export interface CollectionInfo {
+  id: string | number
+  title: string
+  count: number | null
+}
+
+export interface CollectionsResponse {
+  platform: string
+  collections: CollectionInfo[]
+  from_cache?: boolean
+}
+
+export interface CollectionItem {
+  id: string
+  title: string
+  url: string
+  author: string
+  thumbnail: string
+}
+
+export interface CollectionItemsResponse {
+  platform: string
+  collection_id: number
+  items: CollectionItem[]
+}
+
+export const getPlatformCollections = async (platform: string, refresh = false): Promise<CollectionsResponse> =>
+  (await http.get<CollectionsResponse>(`/collections/${platform}`, { params: { refresh } })).data
+
+export const getCollectionItems = async (platform: string, collectionId: number, limit = 100): Promise<CollectionItemsResponse> =>
+  (await http.get<CollectionItemsResponse>(`/collections/${platform}/${collectionId}/items`, { params: { limit } })).data
+
 // Token (Pocket manual)
 export const setPocketToken = async (access_token: string, username = ''): Promise<void> =>
   { await http.post('/auth/pocket/token', { access_token, username }) }
@@ -124,6 +157,30 @@ export const testLLM = async (): Promise<LLMTestResult> =>
   (await http.get<LLMTestResult>('/config/test-llm')).data
 export const testEmbedding = async (): Promise<LLMTestResult> =>
   (await http.get<LLMTestResult>('/config/test-embedding')).data
+
+// ── Data Management ─────────────────────────────────────────────────────────
+export const exportMemories = async (): Promise<Blob> => {
+  const response = await http.get('/memories/export', { responseType: 'blob' })
+  return response.data
+}
+
+export const importMemories = async (file: File): Promise<{ success: boolean; imported: number; updated: number; failed: number }> => {
+  const formData = new FormData()
+  formData.append('file', file)
+  const response = await http.post('/memories/import', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' }
+  })
+  return response.data
+}
+
+export const cleanupOldMemories = async (days: number = 180): Promise<{ success: boolean; deleted_count: number }> =>
+  (await http.delete('/memories/old', { params: { days } })).data
+
+export const resetConfig = async (): Promise<{ success: boolean }> =>
+  (await http.post('/config/reset')).data
+
+export const clearAllMemories = async (confirm: boolean): Promise<{ success: boolean; deleted_count: number }> =>
+  (await http.delete('/memories/all', { params: { confirm: confirm.toString() } })).data
 
 // ── Health ─────────────────────────────────────────────────────────────────
 export const checkHealth = async (): Promise<boolean> => {
