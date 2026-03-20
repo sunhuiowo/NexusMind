@@ -40,13 +40,15 @@
         "importance": 0.85,
         "query_count": 5,
         "media_type": "video",
-        "author": "UP主名称"
+        "author": "UP主名称",
+        "thumbnail_url": "https://example.com/thumb.jpg"
       }
     ]
   }
   ```
 - **Content-Type**：`application/json`
 - **文件名**：`memories_export_20260320_100000.json`
+- **大文件处理**：若记忆数量超过 10000 条，分批查询并流式写入 JSON，避免内存峰值
 
 ### 2. 导入记忆
 - **端点**：`POST /memories/import`
@@ -56,8 +58,8 @@
   1. 解析上传的 JSON 文件
   2. 校验 version 字段（仅支持 "1.0"）
   3. 遍历 memories：
-     - 如果 `platform + platform_id` 已存在 → 覆盖更新（保留 id，更新其他字段）
-     - 如果不存在 → 新增
+     - 如果 `platform + platform_id` 已存在 → 覆盖更新（保留 id 和 `last_accessed_at`，更新其他字段）
+     - 如果不存在 → 新增，`last_accessed_at` 初始化为当前时间
   4. 批量写入 SQLite + FAISS
 - **响应**：
   ```json
@@ -72,13 +74,14 @@
 - **错误处理**：
   - version 不匹配：返回 400
   - JSON 解析失败：返回 400
-  - 部分失败时返回成功但包含错误列表
+  - `bookmarked_at` 格式无效：使用当前时间作为默认值
+  - 部分失败时返回成功但包含错误列表，错误格式为 `{"index": 5, "platform_id": "abc", "error": "错误描述"}`
 
 ### 3. 清理旧记忆
 - **端点**：`DELETE /memories/old`
 - **认证**：需要用户登录
 - **Query 参数**：`days`（默认 180）
-- **删除条件**：`last_accessed_at < (now - days)`
+- **删除条件**：`last_accessed_at < (now - days)`，同时清理 `last_accessed_at` 为 NULL 或空字符串的孤立记录
 - **响应**：
   ```json
   {
@@ -116,7 +119,7 @@
     "deleted_count": 128
   }
   ```
-- **错误**：若 `confirm != "true"`，返回 400
+- **错误**：若 `confirm` 不为小写 `"true"`（大小写不敏感），返回 400
 
 ## 路由文件
 
