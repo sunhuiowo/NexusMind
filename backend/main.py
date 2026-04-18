@@ -31,8 +31,10 @@ from routers.data_management import router as data_management_router, config_rou
 
 
 def create_app():
+    import asyncio
     try:
         from fastapi import FastAPI, HTTPException, BackgroundTasks, Query, File, UploadFile
+        from starlette.responses import StreamingResponse
         from fastapi.middleware.cors import CORSMiddleware
         from pydantic import BaseModel
     except ImportError:
@@ -256,30 +258,175 @@ def create_app():
         item_ids: Optional[List[str]] = None  # 指定具体内容 ID 列表
 
     @app.post("/sync")
-    async def sync_endpoint(req: SyncRequest, background_tasks: BackgroundTasks, request: Request):
+    async def sync_endpoint(req: SyncRequest, request: Request):
+        """
+        同步接口 - 启动后台同步任务并返回 SSE stream ID
+        前端应连接到 /sync/stream 获取实时进度
+        """
         user_id = request.state.user_id
-        if req.platform:
-            background_tasks.add_task(collector_agent.sync_single_platform, req.platform, user_id, req.full_sync, req.folder_ids, req.item_ids)
-            return {"message": f"已启动 {req.platform} 同步"}
-        background_tasks.add_task(collector_agent.sync_all_platforms, user_id, req.full_sync)
-        return {"message": "已启动全平台同步"}
+        from tools.sync_progress import get_progress_manager
+        progress_mgr = get_progress_manager()
+
+        def make_progress_callback(platform: str):
+            def callback(step: str, current: int = 0, total: int = 0, message: str = ""):
+                progress_mgr.update(user_id, platform, step, current, total, message)
+            return callback
+
+        async def run_sync():
+            if req.platform:
+                progress_mgr.start(user_id, req.platform, 0)
+                try:
+                    # 运行在线程池中（collector_agent 是同步的）
+                    result = await asyncio.to_thread(
+                        collector_agent.sync_single_platform,
+                        req.platform, user_id, req.full_sync,
+                        req.folder_ids, req.item_ids,
+                        make_progress_callback(req.platform),
+                    )
+                    progress_mgr.complete(
+                        user_id, req.platform,
+                        added=result.get("added", 0),
+                        skipped=result.get("skipped", 0),
+                        errors=result.get("errors", 0),
+                        error_msg=result.get("error_msg", ""),
+                    )
+                except Exception as e:
+                    progress_mgr.error(user_id, req.platform, str(e))
+            else:
+                # 全平台同步
+                for platform in config.PLATFORMS_ENABLED:
+                    try:
+                        progress_mgr.start(user_id, platform, 0)
+                        result = await asyncio.to_thread(
+                            collector_agent.sync_single_platform,
+                            platform, user_id, req.full_sync,
+                            None, None,
+                            make_progress_callback(platform),
+                        )
+                        progress_mgr.complete(
+                            user_id, platform,
+                            added=result.get("added", 0),
+                            skipped=result.get("skipped", 0),
+                            errors=result.get("errors", 0),
+                            error_msg=result.get("error_msg", ""),
+                        )
+                    except Exception as e:
+                        progress_mgr.error(user_id, platform, str(e))
+
+        # 启动异步任务（不等完成）
+        asyncio.create_task(run_sync())
+        return {"message": "同步已启动，请订阅 /sync/stream 获取进度"}
+
+    @app.get("/sync/stream")
+    async def sync_stream(request: Request):
+        """
+        SSE 实时推送同步进度
+        连接到: EventSource('/api/sync/stream')
+        """
+        user_id = request.state.user_id
+        if not user_id:
+            raise HTTPException(status_code=401, detail="请先登录")
+
+        from tools.sync_progress import get_progress_manager
+        progress_mgr = get_progress_manager()
+
+        async def event_generator():
+            import json
+            # 立即发送当前状态（init 事件）
+            init_state = progress_mgr.get_all(user_id)
+            yield f"event: init\ndata: {json.dumps(init_state, ensure_ascii=False)}\n\n"
+
+            last_state = init_state
+            while True:
+                try:
+                    state = progress_mgr.get_all(user_id)
+                    # 状态有变化时才发送
+                    if state and state != last_state:
+                        data_str = json.dumps(state, ensure_ascii=False)
+                        yield f"event: change\ndata: {data_str}\n\n"
+                        last_state = state
+
+                    # 检查是否所有平台都完成
+                    if state and all(v.get("status") in ("done", "error", "idle") for v in state.values()):
+                        data_str = json.dumps(state, ensure_ascii=False)
+                        yield f"event: done\ndata: {data_str}\n\n"
+                        break
+
+                    await asyncio.sleep(0.5)
+                except GeneratorExit:
+                    break
+                except Exception:
+                    await asyncio.sleep(1)
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     class ResyncRequest(BaseModel):
         platform: Optional[str] = None
 
     @app.post("/resync")
-    async def resync_endpoint(req: ResyncRequest, background_tasks: BackgroundTasks, request: Request):
+    async def resync_endpoint(req: ResyncRequest, request: Request):
         """
-        重新同步接口 - 先删除数据，再执行全量同步
+        重新同步接口 - 先删除数据，再执行全量同步（通过 SSE 推送进度）
         - 指定 platform: 仅重新同步该平台
         - 不指定 platform: 重新同步所有平台
         """
         user_id = request.state.user_id
-        if req.platform:
-            background_tasks.add_task(collector_agent.resync_platform, req.platform, user_id)
-            return {"message": f"已启动 {req.platform} 重新同步（先删除后全量同步）"}
-        background_tasks.add_task(collector_agent.resync_all_platforms, user_id)
-        return {"message": "已启动全平台重新同步（先删除后全量同步）"}
+        if not user_id:
+            raise HTTPException(status_code=401, detail="请先登录")
+
+        from tools.sync_progress import get_progress_manager
+        progress_mgr = get_progress_manager()
+
+        def make_progress_callback(platform: str):
+            def callback(step: str, current: int = 0, total: int = 0, message: str = ""):
+                progress_mgr.update(user_id, platform, step, current, total, message)
+            return callback
+
+        async def run_resync():
+            if req.platform:
+                progress_mgr.start(user_id, req.platform, 0)
+                try:
+                    result = await asyncio.to_thread(
+                        collector_agent.resync_platform,
+                        req.platform, user_id,
+                    )
+                    progress_mgr.complete(
+                        user_id, req.platform,
+                        added=result.get("added", 0),
+                        skipped=result.get("skipped", 0),
+                        errors=result.get("errors", 0),
+                        error_msg=result.get("error_msg", ""),
+                    )
+                except Exception as e:
+                    progress_mgr.error(user_id, req.platform, str(e))
+            else:
+                for platform in config.PLATFORMS_ENABLED:
+                    try:
+                        progress_mgr.start(user_id, platform, 0)
+                        result = await asyncio.to_thread(
+                            collector_agent.resync_platform,
+                            platform, user_id,
+                        )
+                        progress_mgr.complete(
+                            user_id, platform,
+                            added=result.get("added", 0),
+                            skipped=result.get("skipped", 0),
+                            errors=result.get("errors", 0),
+                            error_msg=result.get("error_msg", ""),
+                        )
+                    except Exception as e:
+                        progress_mgr.error(user_id, platform, str(e))
+
+        asyncio.create_task(run_resync())
+        return {"message": "重新同步已启动，请订阅 /sync/stream 获取进度"}
 
     # ── Auth ───────────────────────────────────────────────────────────────
     @app.get("/auth/status")

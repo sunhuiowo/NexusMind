@@ -1,10 +1,31 @@
 // pages/Sync.tsx
-import { useState, useEffect, useMemo } from 'react'
-import { RefreshCw, CheckCircle, XCircle, SkipForward, Loader2, Zap, Trash2, AlertTriangle, ChevronDown, ChevronRight, FolderOpen } from 'lucide-react'
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react'
+import { CheckCircle, XCircle, SkipForward, Loader2, Zap, Trash2, AlertTriangle, ChevronDown, ChevronRight, FolderOpen } from 'lucide-react'
 import { syncPlatform, resyncPlatform, listMemories } from '../api/apiClient'
 import { useSyncStore, useToastStore } from '../store'
 import { cx, PLATFORM_META } from '../utils'
 import type { SyncResult, MemoryCard } from '../api/types'
+
+// SSE progress state type (matches backend tools/sync_progress.py)
+interface PlatformProgress {
+  platform: string
+  status: 'idle' | 'running' | 'done' | 'error'
+  step: 'fetching' | 'parsing' | 'storing' | 'embedding' | 'completed' | ''
+  current: number
+  total: number
+  message: string
+  error: string
+}
+
+const STEP_ORDER = ['fetching', 'parsing', 'storing', 'embedding', 'completed']
+
+const STEP_LABELS: Record<string, string> = {
+  fetching: '获取收藏',
+  parsing: '解析内容',
+  storing: '存储记忆',
+  embedding: '生成向量',
+  completed: '已完成',
+}
 
 const ALL_PLATFORMS = [
   'youtube', 'twitter', 'github', 'pocket',
@@ -35,6 +56,11 @@ export default function Sync() {
   const [timeRange, setTimeRange] = useState<string>('all')
   const [liveLog, setLiveLog] = useState<string[]>([])
   const [showResyncConfirm, setShowResyncConfirm] = useState(false)
+
+  // Real-time SSE progress state
+  const [sseProgress, setSseProgress] = useState<Record<string, PlatformProgress>>({})
+  const eventSourceRef = useRef<EventSource | null>(null)
+  const syncingRef = useRef(false)
 
   // Platform existing memories
   const [platformMemories, setPlatformMemories] = useState<MemoryCard[]>([])
@@ -92,6 +118,79 @@ export default function Sync() {
     }
   }, [selectedPlatform, timeRange])
 
+  // SSE connection for real-time sync progress
+  const connectSSE = useCallback(() => {
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close()
+    }
+    const es = new EventSource('/api/sync/stream')
+    eventSourceRef.current = es
+
+    es.addEventListener('init', (e) => {
+      try {
+        const data = JSON.parse((e as MessageEvent).data)
+        setSseProgress(data)
+        // Check if all done
+        if (data && Object.values(data).every((v: PlatformProgress) => v.status === 'done' || v.status === 'error' || v.status === 'idle')) {
+          syncingRef.current = false
+          setSyncing(false)
+          es.close()
+          eventSourceRef.current = null
+        }
+      } catch {}
+    })
+
+    es.addEventListener('change', (e) => {
+      try {
+        const data = JSON.parse((e as MessageEvent).data)
+        setSseProgress(data)
+        // Check if all done
+        if (data && Object.values(data).every((v: PlatformProgress) => v.status === 'done' || v.status === 'error' || v.status === 'idle')) {
+          syncingRef.current = false
+          setSyncing(false)
+          // Close results after a short delay to show final state
+          setTimeout(() => {
+            setSseProgress({})
+            es.close()
+            eventSourceRef.current = null
+          }, 2000)
+        }
+      } catch {}
+    })
+
+    es.addEventListener('done', (e) => {
+      try {
+        const data = JSON.parse((e as MessageEvent).data)
+        setSseProgress(data)
+        syncingRef.current = false
+        setSyncing(false)
+        setTimeout(() => {
+          setSseProgress({})
+          es.close()
+          eventSourceRef.current = null
+        }, 2000)
+      } catch {}
+    })
+
+    es.addEventListener('heartbeat', () => {
+      // Heartbeat just keeps connection alive
+    })
+
+    es.onerror = () => {
+      es.close()
+      eventSourceRef.current = null
+    }
+  }, [setSyncing])
+
+  // Cleanup SSE on unmount
+  useEffect(() => {
+    return () => {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close()
+      }
+    }
+  }, [])
+
   // Toggle platform expansion in accordion
   function togglePlatformExpand(platform: string) {
     setExpandedPlatforms(prev => {
@@ -129,39 +228,22 @@ export default function Sync() {
   }
 
   async function handleSync() {
-    if (syncing) return
+    if (syncing || syncingRef.current) return
     setSyncing(true)
+    syncingRef.current = true
     setLiveLog([])
     setResults([])
+    setSseProgress({})
 
-    const platforms = selectedPlatform ? [selectedPlatform] : ALL_PLATFORMS
-
-    addLog(`开始${fullSync ? '全量' : '增量'}同步 ${platforms.length} 个平台...`)
-
-    const results: SyncResult[] = []
-    for (const p of platforms) {
-      const meta = PLATFORM_META[p]
-      addLog(`正在同步 ${meta?.name ?? p}...`)
-      try {
-        await syncPlatform(p, fullSync)
-        // Since backend returns only a message (async), we simulate a result
-        const mockResult: SyncResult = { platform: p, success: true, added: 0, skipped: 0, errors: 0 }
-        results.push(mockResult)
-        addLog(`✓ ${meta?.name ?? p} 同步已启动`)
-      } catch (err: any) {
-        const mockResult: SyncResult = {
-          platform: p, success: false, added: 0, skipped: 0, errors: 1,
-          error_msg: err?.message ?? '未知错误',
-        }
-        results.push(mockResult)
-        addLog(`✗ ${meta?.name ?? p} 同步失败`)
-      }
+    // 触发同步 API（一次调用，后端自动处理单平台或全平台）
+    try {
+      await syncPlatform(selectedPlatform || undefined, fullSync)
+    } catch (err: any) {
+      console.error('Sync trigger failed:', err)
     }
 
-    setResults(results)
-    setSyncing(false)
-    push('同步任务已触发，后端正在处理', 'success')
-    addLog('同步任务已全部触发，后端异步处理中...')
+    // 连接 SSE 获取实时进度
+    connectSSE()
   }
 
   function addLog(msg: string) {
@@ -170,39 +252,23 @@ export default function Sync() {
   }
 
   async function handleResync() {
-    if (syncing) return
+    if (syncing || syncingRef.current) return
     setShowResyncConfirm(false)
     setSyncing(true)
+    syncingRef.current = true
     setLiveLog([])
     setResults([])
+    setSseProgress({})
 
-    const platforms = selectedPlatform ? [selectedPlatform] : ALL_PLATFORMS
-
-    addLog(`开始重新同步 ${platforms.length} 个平台（先删除后全量同步）...`)
-
-    const results: SyncResult[] = []
-    for (const p of platforms) {
-      const meta = PLATFORM_META[p]
-      addLog(`正在重新同步 ${meta?.name ?? p}...`)
-      try {
-        await resyncPlatform(p)
-        const mockResult: SyncResult = { platform: p, success: true, added: 0, skipped: 0, errors: 0 }
-        results.push(mockResult)
-        addLog(`✓ ${meta?.name ?? p} 重新同步已启动`)
-      } catch (err: any) {
-        const mockResult: SyncResult = {
-          platform: p, success: false, added: 0, skipped: 0, errors: 1,
-          error_msg: err?.message ?? '未知错误',
-        }
-        results.push(mockResult)
-        addLog(`✗ ${meta?.name ?? p} 重新同步失败`)
-      }
+    // 触发重新同步 API
+    try {
+      await resyncPlatform(selectedPlatform || undefined)
+    } catch (err: any) {
+      console.error('Resync trigger failed:', err)
     }
 
-    setResults(results)
-    setSyncing(false)
-    push('重新同步任务已触发，后端正在处理', 'success')
-    addLog('重新同步任务已全部触发，后端异步处理中...')
+    // 连接 SSE 获取实时进度
+    connectSSE()
   }
 
   return (
@@ -504,6 +570,91 @@ export default function Sync() {
                   {line}
                 </p>
               ))}
+            </div>
+          </div>
+        )}
+
+        {/* Real-time SSE Progress */}
+        {Object.keys(sseProgress).length > 0 && (
+          <div className="card p-4">
+            <div className="flex items-center gap-2 mb-4">
+              <h2 className="text-sm font-semibold text-ink-700">实时进度</h2>
+              {syncing && <Loader2 size={14} className="animate-spin text-accent" />}
+            </div>
+            <div className="space-y-3">
+              {Object.entries(sseProgress).map(([platform, progress]) => {
+                const meta = PLATFORM_META[platform]
+                const percent = progress.total > 0 ? Math.round((progress.current / progress.total) * 100) : 0
+                const isDone = progress.status === 'done'
+                const isError = progress.status === 'error'
+                const isRunning = progress.status === 'running'
+
+                return (
+                  <div key={platform} className="space-y-2">
+                    {/* Platform header */}
+                    <div className="flex items-center gap-2">
+                      {isDone && <CheckCircle size={14} className="text-success flex-shrink-0" />}
+                      {isError && <XCircle size={14} className="text-danger flex-shrink-0" />}
+                      {isRunning && <Loader2 size={14} className="animate-spin text-accent flex-shrink-0" />}
+                      <span className="text-sm font-medium text-ink-700">{meta?.name ?? platform}</span>
+                      {progress.message && (
+                        <span className="text-xs text-ink-400 truncate flex-1">{progress.message}</span>
+                      )}
+                      {isDone && !isError && (
+                        <span className="text-xs text-success font-medium">
+                          {progress.message?.includes('新增') ? progress.message.split('新增')[1]?.trim() || '完成' : '完成'}
+                        </span>
+                      )}
+                      {isError && <span className="text-xs text-danger truncate max-w-[120px]">{progress.error}</span>}
+                    </div>
+
+                    {/* Step indicators */}
+                    {isRunning && (
+                      <>
+                        {/* Step dots */}
+                        <div className="flex items-center gap-1.5">
+                          {STEP_ORDER.filter(s => s !== 'completed').map((step, idx) => {
+                            const stepIdx = STEP_ORDER.indexOf(step)
+                            const currentIdx = STEP_ORDER.indexOf(progress.step || 'fetching')
+                            const isActive = stepIdx <= currentIdx
+                            const isCurrent = step === progress.step
+                            return (
+                              <div key={step} className="flex items-center gap-1.5">
+                                <div className={cx(
+                                  'w-2 h-2 rounded-full transition-colors',
+                                  isActive ? 'bg-accent' : 'bg-ink-200'
+                                )} />
+                                {isCurrent && (
+                                  <span className="text-xs text-accent font-medium">{STEP_LABELS[step]}</span>
+                                )}
+                                {stepIdx < STEP_ORDER.length - 2 && idx < 3 && (
+                                  <span className={cx(
+                                    'text-xs', isActive ? 'text-ink-400' : 'text-ink-200'
+                                  )}>›</span>
+                                )}
+                              </div>
+                            )
+                          })}
+                        </div>
+                        {/* Progress bar */}
+                        {progress.total > 0 && (
+                          <div className="flex items-center gap-2">
+                            <div className="flex-1 h-1.5 bg-ink-100 rounded-full overflow-hidden">
+                              <div
+                                className="h-full bg-accent rounded-full transition-all duration-300"
+                                style={{ width: `${percent}%` }}
+                              />
+                            </div>
+                            <span className="text-xs text-ink-400 w-12 text-right">
+                              {progress.current}/{progress.total}
+                            </span>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                )
+              })}
             </div>
           </div>
         )}

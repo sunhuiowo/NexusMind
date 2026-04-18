@@ -7,7 +7,7 @@ Collector Agent - 拉取 + 解析 + 入库
 import logging
 import traceback
 from datetime import datetime
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Callable
 from pathlib import Path
 
 import sys
@@ -22,6 +22,39 @@ logger = logging.getLogger(__name__)
 
 # 增量同步时间戳缓存（内存级，重启后从 DB 重建）
 _last_sync_at: Dict[str, datetime] = {}
+
+# ── 进度回调类型 ────────────────────────────────────────────────────────────
+# progress_callback(step, current, total, message)
+# step: "fetching" | "parsing" | "storing" | "completed" | "error"
+
+
+def _emit_progress(
+    callback: Optional[Callable],
+    step: str,
+    current: int = 0,
+    total: int = 0,
+    message: str = "",
+):
+    """
+    线程安全地调用进度回调。
+    如果回调是异步的（协程），用 call_soon_threadsafe 安全调度到事件循环。
+    如果回调是普通函数，直接调用。
+    """
+    if not callback:
+        return
+    try:
+        import asyncio
+        loop = asyncio.get_running_loop()
+        # 在事件循环线程中调度
+        loop.call_soon_threadsafe(lambda: callback(step, current, total, message))
+    except RuntimeError:
+        # 没有运行中的事件循环（比如在同步上下文中），直接调用
+        try:
+            callback(step, current, total, message)
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 
 def _get_connector(platform: str) -> Optional[BasePlatformConnector]:
@@ -52,6 +85,26 @@ def _get_connector(platform: str) -> Optional[BasePlatformConnector]:
         return None
 
 
+_media_router = None
+
+
+def _get_media_router():
+    """获取 MediaRouter 单例"""
+    global _media_router
+    if _media_router is None:
+        from parsers.media_router import MediaRouter
+        from parsers.bilibili_parser import BilibiliParser
+        from parsers.youtube_parser import YouTubeMediaParser
+        from parsers.audio_parser import AudioMediaParser
+
+        router = MediaRouter()
+        router.register_parser(BilibiliParser())
+        router.register_parser(YouTubeMediaParser())
+        router.register_parser(AudioMediaParser())
+        _media_router = router
+    return _media_router
+
+
 def _parse_content(content: RawContent, llm_func=None, user_id: str = "") -> RawContent:
     """
     按 media_type 路由到对应解析器，丰富 body 字段
@@ -70,71 +123,24 @@ def _parse_content(content: RawContent, llm_func=None, user_id: str = "") -> Raw
             except Exception as e:
                 logger.debug(f"[Collector] 网页解析失败: {e}")
 
-    # 视频：Whisper ASR + 分层摘要
-    elif media_type == "video":
-        if content.url:
-            # B站视频特殊处理 - 使用专门的B站解析器
-            if "bilibili.com" in content.url or content.platform == "bilibili":
-                try:
-                    from parsers.bilibili_parser import parse_bilibili_video
-                    from auth.token_store import get_token_store
-
-                    # 获取B站登录凭证
-                    token_store = get_token_store(user_id)
-                    token_data = token_store.load("bilibili")
-
-                    sessdata = None
-                    bili_jct = None
-                    dedeuserid = None
-                    if token_data:
-                        sessdata = token_data.sessdata or token_data.cookie
-                        bili_jct = token_data.bili_jct
-                        dedeuserid = token_data.dedeuserid
-
-                    result = parse_bilibili_video(
-                        content.url,
-                        sessdata=sessdata,
-                        bili_jct=bili_jct,
-                        dedeuserid=dedeuserid
-                    )
-
-                    if result.get("content"):
-                        content.body = result["content"]
-                        logger.info(f"[Collector] B站视频解析成功 [{content.platform_id}]，来源: {result.get('source')}")
-                except Exception as e:
-                    logger.warning(f"[Collector] B站视频解析失败，尝试通用视频解析: {e}")
-                    # 降级到通用视频解析
-                    try:
-                        from parsers.video_parser import parse_video
-                        result = parse_video(content.url, llm_func=llm_func)
-                        if result.global_summary:
-                            content.body = result.global_summary
-                        elif result.full_transcript:
-                            content.body = result.full_transcript[:3000]
-                    except Exception as e2:
-                        logger.debug(f"[Collector] 通用视频解析也失败: {e2}")
-            else:
-                # 其他平台视频使用通用解析
-                try:
-                    from parsers.video_parser import parse_video
-                    result = parse_video(content.url, llm_func=llm_func)
-                    if result.global_summary:
-                        content.body = result.global_summary
-                    elif result.full_transcript:
-                        content.body = result.full_transcript[:3000]
-                except Exception as e:
-                    logger.debug(f"[Collector] 视频解析失败，使用原始 body: {e}")
-
-    # 音频：Whisper ASR
-    elif media_type == "audio":
+    # 音视频：使用 MediaRouter (subtitle → ASR)
+    elif media_type in ("video", "audio"):
         if content.url:
             try:
-                from parsers.audio_parser import transcribe_audio
-                result = transcribe_audio(content.url)
-                if result.get("text"):
-                    content.body = result["text"][:5000]
+                router = _get_media_router()
+                result = router.route(
+                    url=content.url,
+                    media_type=content.media_type,
+                    platform=content.platform,
+                    credentials=None,
+                    bookmarked_at=content.bookmarked_at,
+                )
+                if result and result.transcript:
+                    content.body = result.transcript[:5000]
+                    logger.info(f"[Collector] MediaRouter 解析成功: platform={content.platform}, "
+                               f"source={result.source}, len={len(result.transcript)}")
             except Exception as e:
-                logger.debug(f"[Collector] 音频转录失败: {e}")
+                logger.warning(f"[Collector] MediaRouter 解析失败: {e}")
 
     # 图片（小红书等）：Qwen2-VL 图像理解
     elif media_type == "image":
@@ -189,12 +195,17 @@ class CollectorAgent:
         platform: str,
         user_id: str,
         full_sync: bool = False,
+        folder_ids: Optional[List[int]] = None,
+        item_ids: Optional[List[str]] = None,
+        progress_callback: Optional[Callable] = None,
     ) -> Dict[str, Any]:
         """
         同步单个平台
         返回同步结果统计
         user_id: 用于数据隔离，如果为None则从上下文获取
+        progress_callback: 可选回调，签名: callback(step, current, total, message)
         """
+        _emit_progress(progress_callback, "fetching", message=f"开始同步 {platform}...")
         logger.info(f"[Collector] 开始同步平台: {platform} (full_sync={full_sync})")
 
         result = {
@@ -224,11 +235,15 @@ class CollectorAgent:
         except AuthError as e:
             result["error_msg"] = f"认证失败: {e}"
             logger.warning(f"[Collector] {platform} 认证失败（跳过）: {e}")
+            _emit_progress(progress_callback, "error", message=f"认证失败: {e}")
             return result
         except Exception as e:
             result["error_msg"] = str(e)
             logger.error(f"[Collector] {platform} 同步异常: {e}")
+            _emit_progress(progress_callback, "error", message=f"同步异常: {e}")
             return result
+
+        _emit_progress(progress_callback, "fetching", total=len(raw_contents), message=f"获取到 {len(raw_contents)} 条收藏")
 
         # 解析 + 入库（批量并行处理）
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -262,13 +277,17 @@ class CollectorAgent:
 
         # 并行解析内容
         logger.info(f"[Collector] 开始并行解析 {len(new_contents)} 条内容...")
+        _emit_progress(progress_callback, "parsing", total=len(new_contents), message=f"开始解析 {len(new_contents)} 条内容...")
         parsed_contents = []
+        parsed_count = 0
         with ThreadPoolExecutor(max_workers=4) as executor:
             futures = {executor.submit(parse_and_enqueue, c, self._llm, user_id): c for c in new_contents}
             for future in as_completed(futures):
                 parsed = future.result()
+                parsed_count += 1
                 if parsed:
                     parsed_contents.append(parsed)
+                _emit_progress(progress_callback, "parsing", current=parsed_count, total=len(new_contents), message=f"解析中 {parsed_count}/{len(new_contents)}")
 
         logger.info(f"[Collector] 解析完成，{len(parsed_contents)} 条待入库")
 
@@ -276,6 +295,7 @@ class CollectorAgent:
         if parsed_contents:
             try:
                 from tools.mcp_tools import add_memories_batch
+                _emit_progress(progress_callback, "storing", total=len(parsed_contents), message=f"正在存储 {len(parsed_contents)} 条...")
                 memory_ids = add_memories_batch(
                     parsed_contents,
                     llm_func=self._llm,
@@ -302,6 +322,12 @@ class CollectorAgent:
         # 更新同步时间戳
         _last_sync_at[platform] = datetime.utcnow()
         result["success"] = True
+
+        _emit_progress(
+            progress_callback, "completed",
+            total=result["added"] + result["skipped"],
+            message=f"完成！新增 {result['added']} 条",
+        )
 
         logger.info(
             f"[Collector] {platform} 同步完成: "
