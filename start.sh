@@ -42,22 +42,30 @@ fi
 echo -e "${BLUE}📦 安装后端依赖...${RESET}"
 cd "$BACKEND_DIR"
 
-# 使用虚拟环境（如果存在则复用）
-if [ ! -d ".venv" ]; then
-  python3 -m venv .venv
-fi
-source .venv/bin/activate
+# 优先使用 uv（推荐），回退到 pip
+if command -v uv &>/dev/null; then
+    echo -e "${BLUE}   使用 uv 管理依赖（推荐）${RESET}"
+    uv sync
+else
+    echo -e "${YELLOW}   uv 未找到，使用 pip 安装${RESET}"
+    # 使用虚拟环境（如果存在则复用）
+    if [ ! -d ".venv" ]; then
+      python3 -m venv .venv
+    fi
+    source .venv/bin/activate
 
-# 只安装核心依赖（不含大型 AI 模型）
-pip install --quiet --upgrade pip
-pip install --quiet \
-  fastapi uvicorn pydantic \
-  openai anthropic \
-  faiss-cpu \
-  cryptography requests \
-  python-dotenv \
-  trafilatura beautifulsoup4 lxml \
-  pdfplumber PyMuPDF 2>/dev/null || true
+    # 只安装核心依赖（不含大型 AI 模型）
+    pip install --quiet --upgrade pip
+    pip install --quiet -r requirements.txt 2>/dev/null || \
+    pip install --quiet \
+      fastapi uvicorn pydantic \
+      openai anthropic \
+      faiss-cpu \
+      cryptography requests \
+      python-dotenv \
+      trafilatura beautifulsoup4 lxml \
+      pdfplumber PyMuPDF 2>/dev/null || true
+fi
 
 echo -e "${GREEN}✓ 后端依赖就绪${RESET}"
 
@@ -70,21 +78,28 @@ fi
 echo -e "${GREEN}✓ 前端依赖就绪${RESET}"
 
 # ── 启动后端 ──────────────────────────────────────────────────────────────────
-echo -e "${BLUE}🚀 启动后端 (port 8000)...${RESET}"
+echo -e "${BLUE}🚀 启动后端 (port 8001)...${RESET}"
 cd "$BACKEND_DIR"
-source .venv/bin/activate
 
-# Load .env
+# Load .env and export all variables
 set -a; source .env; set +a
 
-python main.py serve &
-BACKEND_PID=$!
+# 启动后端服务
+if [ -f ".venv/bin/python" ]; then
+    # venv 环境（uv 或手动创建）
+    .venv/bin/python main.py serve &
+    BACKEND_PID=$!
+else
+    # 直接调用 python
+    python3 main.py serve &
+    BACKEND_PID=$!
+fi
 echo -e "${GREEN}✓ 后端 PID: $BACKEND_PID${RESET}"
 
 # Wait for backend to be ready
 echo -n "   等待后端就绪..."
 for i in $(seq 1 30); do
-  if curl -s http://localhost:8000/health >/dev/null 2>&1; then
+  if curl -s http://localhost:8001/health >/dev/null 2>&1; then
     echo -e " ${GREEN}✓${RESET}"
     break
   fi
@@ -106,8 +121,8 @@ echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━
 echo -e "${GREEN}✅ 启动成功！${RESET}"
 echo ""
 echo -e "   前端:    ${BLUE}http://localhost:5173${RESET}"
-echo -e "   后端 API: ${BLUE}http://localhost:8000${RESET}"
-echo -e "   API 文档: ${BLUE}http://localhost:8000/docs${RESET}"
+echo -e "   后端 API: ${BLUE}http://localhost:8001${RESET}"
+echo -e "   API 文档: ${BLUE}http://localhost:8001/docs${RESET}"
 echo ""
 echo -e "${YELLOW}按 Ctrl+C 停止所有服务${RESET}"
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
